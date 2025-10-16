@@ -1,0 +1,13 @@
+{
+  "EMAIL_CONFIG": {
+    "IMAP_SERVER": "imap.mail.yahoo.co.jp",
+    "IMAP_PORT": 993,
+    "EMAIL_ADDRESS": "sharkguragura_666@yahoo.co.jp",
+    "APP_PASSWORD": "asd.6933562",
+    "TIME_AREA": "Asia",
+    "TIME_NATION": "Tokyo",
+    "THRESHOLD": {
+      "VALID_SCORE": 3
+    }
+  }
+}

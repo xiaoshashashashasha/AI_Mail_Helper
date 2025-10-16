@@ -1,0 +1,32 @@
+{
+    "SENDER_INFO_LIST": {
+        "mail.yahoo.co.jp": {
+            "loginalert-master": 5,
+            "maps-master": 2,
+            "ebookjapan": 2,
+            "jobs-info-master": 2,
+            "finance-hikaku": 2,
+            "ybb-info-master": 2,
+            "keitaishoplinemo-info-master": 2
+        },
+        "m.matsukiyococokara-online.com": {
+            "ma": 2
+        },
+        "uber.com": {
+            "noreply": 3,
+            "uber": 2
+        },
+        "point.recruit.co.jp": {
+            "addp": 3
+        },
+        "e.suumo.jp": {
+            "suumo-support": 2
+        },
+        "tokyu-nasic.jp": {
+            "takanori-fukuzawa": 4
+        },
+        "kizuna-927.info": {
+            "1139914": 2
+        }
+    }
+}
