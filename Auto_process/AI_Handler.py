@@ -4,9 +4,10 @@ import time
 from datetime import datetime
 from Auto_process.mail_AutoProcess import VALID_SCORE
 from Auto_process.mail_AutoProcess import TIMEZONE
+from Utils.util import datetime_to_json
 
 PROMPT_FILE_PATH = "../Setup/Prompt_config.json"
-JUDGMENT_RECORD_PATH = "../Setup/mail_judgement_record.json"
+JUDGMENT_RECORD_PATH = "../Info/mail_judgement_record.json"
 
 try:
     with open(PROMPT_FILE_PATH, 'r', encoding='utf-8') as f:
@@ -73,7 +74,7 @@ def save_mail_judgment_record(new_records):
         with open(JUDGMENT_RECORD_PATH, 'w', encoding='utf-8') as f:
             # ensure_ascii=False 确保中文能正确写入 JSON 文件
             # indent=4 使文件格式更易读
-            json.dump(combined_records, f, ensure_ascii=False, indent=4)
+            json.dump(combined_records, f, ensure_ascii=False, indent=4,default=datetime_to_json)
         print(f"信息：成功将 {len(new_records)} 条 AI 判断记录追加并写入文件 {JUDGMENT_RECORD_PATH}。")
     except IOError as e:
         print(f"错误：写入文件 {JUDGMENT_RECORD_PATH} 失败: {e}")

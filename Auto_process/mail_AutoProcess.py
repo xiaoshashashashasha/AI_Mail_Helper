@@ -4,13 +4,13 @@ import json
 import os
 import pytz
 import AI_Handler
+
+from datetime import datetime
 from email.utils import parseaddr
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from google import genai
-from Utils.util import datetime_to_json
-
-
+from Utils.util import datetime_to_json, extract_text_from_html
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAIL_CONFIG_FILE = os.path.join(CURRENT_DIR, "../Setup/mail_config.json")
@@ -102,18 +102,35 @@ def fetch_unseen_emails(mclient, json_file_path=RAW_OUTPUT_PATH):
 
 
         body = ""
+        html_body = ""
 
         if msg.is_multipart():
             for part in msg.walk():
                 ctype = part.get_content_type()
                 cdispo = str(part.get('Content-Disposition'))
+                payload = part.get_payload(decode=True)
 
-                if ctype == 'text/plain' and 'attachment' not in cdispo:
-                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                    break
+                if ctype == 'text/plain' and 'attachment' not in cdispo and payload:
+                    # 找到纯文本，优先使用，并跳出循环
+                    body = payload.decode('utf-8', errors='ignore').strip()
+                    if body:
+                        break
+
+                elif ctype == 'text/html' and 'attachment' not in cdispo and payload:
+                    # 存储 HTML 内容作为后备
+                    html_body = payload.decode('utf-8', errors='ignore').strip()
+
         else:
-            if msg.get_content_type() == 'text/plain':
-                body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+            # 非 multipart 消息
+            payload = msg.get_payload(decode=True)
+            if msg.get_content_type() == 'text/plain' and payload:
+                body = payload.decode('utf-8', errors='ignore').strip()
+            elif msg.get_content_type() == 'text/html' and payload:
+                html_body = payload.decode('utf-8', errors='ignore').strip()
+
+        if len(body) == 0:
+            body = extract_text_from_html(html_body)
+
         # ----------------------------------------------------
         # 转换为指定时区时间
         if sent_time:
@@ -146,7 +163,6 @@ def fetch_unseen_emails(mclient, json_file_path=RAW_OUTPUT_PATH):
     # ------------------- JSON 写入部分 -------------------
     if emails:
 
-
         # 1. 尝试读取现有数据
         all_emails = []
         try:
@@ -160,9 +176,11 @@ def fetch_unseen_emails(mclient, json_file_path=RAW_OUTPUT_PATH):
 
             # 2. 合并新数据,并按发送时间进行排序
         all_emails.extend(emails)
-        all_emails.sort(key=lambda email: email['sent_time'])
+        all_emails.sort(key=lambda email: email['sent_time']
+                 if isinstance(email['sent_time'], datetime)
+                 else datetime.fromisoformat(email['sent_time']))
 
-        # 3. 写入完整合并后的数据 (覆盖旧文件)
+        # 3. 写入完整合并后的数据
         with open(json_file_path, 'w', encoding='utf-8') as f:
             json.dump(all_emails, f, indent=4, ensure_ascii=False, default=datetime_to_json)
         print(f"成功提取 {len(emails)} 封邮件，并写入到 {json_file_path}")
@@ -211,11 +229,11 @@ def email_classification(ai_client, emails, invalid_output_path="../Info/invalid
 
         # 若存在评分，则为其数据结构统一添加
         elif score >= VALID_SCORE:
-            email["ai_score"] = score
+            email["score"] = score
             valid_emails.append(email)
 
         else :
-            email["ai_score"] = score
+            email["score"] = score
             invalid_emails.append(email)
 
 
@@ -273,7 +291,9 @@ def email_classification(ai_client, emails, invalid_output_path="../Info/invalid
 
         # 2. 合并新数据
         all_invalid_emails.extend(invalid_emails)
-        all_invalid_emails.sort(key=lambda email: email['sent_time'])
+        all_invalid_emails.sort(key=lambda email: email['sent_time']
+                 if isinstance(email['sent_time'], datetime)
+                 else datetime.fromisoformat(email['sent_time']))
 
         # 3. 覆盖写入完整列表
         with open(invalid_output_path, 'w', encoding='utf-8') as f:
@@ -286,13 +306,15 @@ def email_classification(ai_client, emails, invalid_output_path="../Info/invalid
         # 对于没有总结的，交由AI进行总结
         need_summarize_list = []
         for email in valid_emails:
-            if not email["summary"]:
+            if not email.get("summary",None):
                 need_summarize_list.append(email)
 
         if len(need_summarize_list) > 0:
             result_list = AI_Handler.get_summary_for_valid_emails(ai_client, need_summarize_list, MODEL_NAME)
             valid_emails.extend(result_list)
-            valid_emails.sort(key=lambda email: email['sent_time'])
+            valid_emails.sort(key=lambda email: email['sent_time']
+                 if isinstance(email['sent_time'], datetime)
+                 else datetime.fromisoformat(email['sent_time']))
 
         # 存储为有效邮件
         # 1. 读取现有有效邮件数据
@@ -307,7 +329,9 @@ def email_classification(ai_client, emails, invalid_output_path="../Info/invalid
 
         # 2. 合并新数据
         all_valid_emails.extend(valid_emails)
-        all_valid_emails.sort(key=lambda email: email['sent_time'])
+        all_valid_emails.sort(key=lambda email: email['sent_time']
+                 if isinstance(email['sent_time'], datetime)
+                 else datetime.fromisoformat(email['sent_time']))
 
         # 3. 覆盖写入完整列表
         with open(valid_output_path, 'w', encoding='utf-8') as f:
