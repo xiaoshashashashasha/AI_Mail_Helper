@@ -1,4 +1,3 @@
-
 import imaplib
 import email
 import json
@@ -10,6 +9,7 @@ from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from google import genai
 from Utils.util import datetime_to_json
+
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -158,7 +158,7 @@ def fetch_unseen_emails(mclient, json_file_path=RAW_OUTPUT_PATH):
             print(f"WARNING: 原始数据文件读取失败 ({e})，将以新数据覆盖。")
             all_emails = []
 
-            # 2. 合并新数据
+            # 2. 合并新数据,并按发送时间进行排序
         all_emails.extend(emails)
         all_emails.sort(key=lambda email: email['sent_time'])
 
@@ -173,7 +173,7 @@ def fetch_unseen_emails(mclient, json_file_path=RAW_OUTPUT_PATH):
 
 # --- 对邮件分类并存储 ---
 """获取评分表，根据匹配到的分数进行第一次分类，无匹配项的则将其交由AI进行评分（摘要和正文内容），随后根据该发件地址对分数列表进行维护"""
-def email_classification(emails, ai_client, invalid_output_path="../Info/invalid_emails.json", valid_output_path="../Info/valid_emails.json"):
+def email_classification(ai_client, emails, invalid_output_path="../Info/invalid_emails.json", valid_output_path="../Info/valid_emails.json"):
     valid_emails = []
     invalid_emails = []
     uncertain_emails = []
@@ -209,15 +209,19 @@ def email_classification(emails, ai_client, invalid_output_path="../Info/invalid
         if score is None:
             uncertain_emails.append(email)
 
+        # 若存在评分，则为其数据结构统一添加
         elif score >= VALID_SCORE:
+            email["ai_score"] = score
             valid_emails.append(email)
 
         else :
+            email["ai_score"] = score
             invalid_emails.append(email)
+
 
     # 完成分类后分别进行对应处理
     # 未识别邮件交由AI根据摘要和内容进行评分后分为有效和无效邮件中
-    if uncertain_emails:
+    if len(uncertain_emails) > 0:
         print(f"SUCCESS: {len(uncertain_emails)} 封邮件被初步筛选为待定,等待后续识别归档")
         # 交由AI读取其内容并为其进行评分,返回邮件字典-评分的元组的列表
         result_list = AI_Handler.get_score_for_uncertain_emails(ai_client, uncertain_emails, MODEL_NAME)
@@ -225,7 +229,7 @@ def email_classification(emails, ai_client, invalid_output_path="../Info/invalid
         count = 0
         # 根据结果字典维护邮件评分文件
         if result_list:
-            for email, score in result_list:
+            for email in result_list:
                 sender_root = email['sender_root']
                 sender_name = email['sender_name']
 
@@ -233,9 +237,9 @@ def email_classification(emails, ai_client, invalid_output_path="../Info/invalid
                     score_list[sender_root] = {}
 
                 if sender_name in score_list[sender_root]:
-                    score_list[sender_root][sender_name] = int(round((score_list[sender_root][sender_name] + score) / 2))
+                    score_list[sender_root][sender_name] = int(round((score_list[sender_root][sender_name] + email["score"]) / 2))
                 else:
-                    score_list[sender_root][sender_name] = score
+                    score_list[sender_root][sender_name] = email["score"]
 
                 count += 1
 
@@ -247,15 +251,16 @@ def email_classification(emails, ai_client, invalid_output_path="../Info/invalid
                     f"SUCCESS: {count} 条记录被维护到 {SCORE_LIST_PATH}中")
 
             # 进行邮件有效性的区分
-            for email,score in result_list:
-                if score >= VALID_SCORE:
+            for email in result_list:
+                if email["score"] >= VALID_SCORE:
                     valid_emails.append(email)
                 else:
                     invalid_emails.append(email)
             print(f"SUCCESS: {len(uncertain_emails)} 封邮件重分类成功")
 
-    # 存储无效邮件
-    if invalid_emails:
+
+    # 无效邮件直接进行存储
+    if len(invalid_emails) > 0:
         # 1. 读取现有无效邮件数据
         all_invalid_emails = []
         try:
@@ -277,12 +282,17 @@ def email_classification(emails, ai_client, invalid_output_path="../Info/invalid
 
 
     # 有效邮件完善其数据结构,后续用于对话记忆等功能
-    if valid_emails:
-        # 对于没有总结和评分的，交由AI进行评分和总结
+    if len(valid_emails) > 0:
+        # 对于没有总结的，交由AI进行总结
+        need_summarize_list = []
+        for email in valid_emails:
+            if not email["summary"]:
+                need_summarize_list.append(email)
 
-
-        # 遍历有效邮件查看是否构成对话,若构成则检查对话历史,若存在则完善对话过程,不存在则建立新的对话历史
-
+        if len(need_summarize_list) > 0:
+            result_list = AI_Handler.get_summary_for_valid_emails(ai_client, need_summarize_list, MODEL_NAME)
+            valid_emails.extend(result_list)
+            valid_emails.sort(key=lambda email: email['sent_time'])
 
         # 存储为有效邮件
         # 1. 读取现有有效邮件数据
@@ -310,17 +320,25 @@ def email_classification(emails, ai_client, invalid_output_path="../Info/invalid
 
 if __name__ == '__main__':
 
+    # 加载配置
     mclient = connect_and_login_email()
     ai_client = connect_gemini()
+
+    # 获取邮箱未读邮件
     fetched_emails = fetch_unseen_emails(mclient, json_file_path='../Info/inbox_data.json')
+
     # 后续自动步骤：
     # 识别、总结与对话的记忆
     #   对返回的邮件信息根据域名黑名单进行初筛，保留的邮件交由AI进行总结并甄别，
     #   识别分类-将无效邮件数据存储到json中，无法识别的列为无法识别，交由AI进行判断
     #   根据AI的评分维护邮件地址评价文件,
     #   对有效邮件的type类型进行映射获取邮件属性，完善其数据结构并存储到json中，
-    #   根据总结后的完整邮件信息来维护对话记忆表。
-    valid_emails = email_classification(fetched_emails, ai_client)
+    #   总结后的完整邮件信息将用于维护对话记忆表。
+    valid_emails = email_classification(ai_client, fetched_emails)
+
+    # 遍历有效邮件查看是否构成对话,若构成则检查对话历史,若存在则完善对话过程,不存在则建立新的对话历史
+
+
     # 整个自动流程将定时进行，之后需要完善邮件的来源：qq邮箱、Y！メール、Gmail等。
 
 
