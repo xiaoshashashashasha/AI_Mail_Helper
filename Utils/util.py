@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from email.utils import getaddresses
 from html.parser import HTMLParser
 
 
@@ -8,6 +9,7 @@ def datetime_to_json(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 
 # --- HTML 文本提取器 ---
 class HTMLTextExtractor(HTMLParser):
@@ -80,3 +82,23 @@ def extract_text_from_html(html_string):
     except Exception as e:
         print(f"警告: HTML 文本提取失败: {e}")
         return html_string  # 失败时返回原始 HTML，交给 AI 处理
+
+
+def get_address_list_from_header(headers):
+    """
+        从邮件头部字段 (To, Cc) 中解析并提取所有邮箱地址。
+
+        Args:
+            header_value (str): 原始邮件头部字段值。
+
+        Returns:
+            list: 邮箱地址字符串列表。
+        """
+    if not headers:
+        return []
+
+    # 使用 email.utils.getaddresses 来处理复杂的地址字符串，包括编码和多个地址
+    addresses = getaddresses([headers])
+
+    # addresses 是一个 (display_name, email_address) 元组的列表
+    return [email_addr for display_name, email_addr in addresses if email_addr]

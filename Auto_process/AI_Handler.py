@@ -1,13 +1,14 @@
 import json
+import os
 import time
 
 from datetime import datetime
-from Auto_process.mail_AutoProcess import VALID_SCORE
+from Auto_process.mail_AutoProcess import VALID_SCORE, CURRENT_DIR
 from Auto_process.mail_AutoProcess import TIMEZONE
 from Utils.util import datetime_to_json
 
-PROMPT_FILE_PATH = "../Configs/Prompt_config.json"
-JUDGMENT_RECORD_PATH = "../Info/mail_judgement_record.json"
+PROMPT_FILE_PATH = os.path.join(CURRENT_DIR, "../Configs/Prompt_config.json")
+JUDGMENT_RECORD_PATH = os.path.join(CURRENT_DIR, "../Info/mail_judgement_record.json")
 
 try:
     with open(PROMPT_FILE_PATH, 'r', encoding='utf-8') as f:
