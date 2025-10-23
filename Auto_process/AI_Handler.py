@@ -6,7 +6,7 @@ from Auto_process.mail_AutoProcess import VALID_SCORE
 from Auto_process.mail_AutoProcess import TIMEZONE
 from Utils.util import datetime_to_json
 
-PROMPT_FILE_PATH = "../Setup/Prompt_config.json"
+PROMPT_FILE_PATH = "../Configs/Prompt_config.json"
 JUDGMENT_RECORD_PATH = "../Info/mail_judgement_record.json"
 
 try:
