@@ -278,11 +278,12 @@ def fetch_sent_emails(mclient, json_file_path=SENT_RAWDATA_OUTPUT_PATH):
         to = get_address_list_from_header(to_header)
         cc = get_address_list_from_header(cc_header)
 
+        display_name, email_addr = parseaddr(sender)
 
         # 结构化返回信息
         emails.append({
             'id': email_id.decode(),
-            'sender': sender,
+            'sender': email_addr,
             'to': to,
             'cc': cc,
             'subject': subject,
@@ -290,42 +291,44 @@ def fetch_sent_emails(mclient, json_file_path=SENT_RAWDATA_OUTPUT_PATH):
             'body': body
         })
 
-        # ------------------- JSON 写入部分 (新增去重逻辑) -------------------
-        if emails:
+    # ------------------- JSON 写入部分 (新增去重逻辑) -------------------
+    if emails:
 
-            # 1. 尝试读取现有数据
+        # 尝试读取现有数据
+        all_emails = []
+        existing_ids = set()  # 存储现有邮件的ID
+        try:
+            if os.path.exists(json_file_path) and os.path.getsize(json_file_path) > 0:
+                with open(json_file_path, 'r', encoding='utf-8') as f:
+                    all_emails = json.load(f)
+
+                # 从已读取的数据中收集所有 ID
+                existing_ids = {email.get('id') for email in all_emails if email.get('id')}
+        except Exception as e:
+            print(f"WARNING: 原始数据文件读取失败 ({e})，将以新数据覆盖。")
             all_emails = []
-            existing_ids = set()  # 存储现有邮件的ID
-            try:
-                if os.path.exists(json_file_path) and os.path.getsize(json_file_path) > 0:
-                    with open(json_file_path, 'r', encoding='utf-8') as f:
-                        all_emails = json.load(f)
 
-                    # 从已读取的数据中收集所有 ID
-                    existing_ids = {email.get('id') for email in all_emails if email.get('id')}
-            except Exception as e:
-                print(f"WARNING: 原始数据文件读取失败 ({e})，将以新数据覆盖。")
-                all_emails = []
 
-            # 2. 筛选出本次获取到的、ID不在现有列表中的邮件 (去重)
+        if not len(all_emails) > 0:
+            new_unique_emails = emails
+        else:
             new_unique_emails = [email for email in emails if email.get('id') not in existing_ids]
 
-            # 3. 合并新数据,并按发送时间进行排序
-            all_emails.extend(new_unique_emails)  # 只追加不重复的邮件
+        all_emails.extend(new_unique_emails)  # 只追加不重复的邮件
 
-            # 排序逻辑
-            all_emails.sort(key=lambda email: email['sent_time']
-            if isinstance(email['sent_time'], datetime)
-            else datetime.fromisoformat(email['sent_time']))
+        # 排序逻辑
+        all_emails.sort(key=lambda email: email['sent_time']
+        if isinstance(email['sent_time'], datetime)
+        else datetime.fromisoformat(email['sent_time']))
 
-            # 4. 写入完整合并后的数据
-            with open(json_file_path, 'w', encoding='utf-8') as f:
-                json.dump(all_emails, f, indent=4, ensure_ascii=False, default=datetime_to_json)
-            print(f"成功提取 {len(new_unique_emails)} 封新增的已发送邮件，并写入到 {json_file_path}")
-        else:
-            print("没有发现新的已发送邮件。")
+        # 写入完整合并后的数据
+        with open(json_file_path, 'w', encoding='utf-8') as f:
+            json.dump(all_emails, f, indent=4, ensure_ascii=False, default=datetime_to_json)
+        print(f"成功提取 {len(new_unique_emails)} 封新增的已发送邮件，并写入到 {json_file_path}")
+    else:
+        print("没有发现新的已发送邮件。")
 
-        return emails
+    return emails
 
 
 # --- 对邮件分类并存储，随后根据该发件地址对分数列表进行维护 ---
