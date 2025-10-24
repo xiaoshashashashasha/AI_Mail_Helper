@@ -174,13 +174,13 @@ def get_score_for_uncertain_emails(ai_client, uncertain_emails, model_name="gemi
 
 
 # --- 有效邮件总结 ---
-def get_summary_for_valid_emails(ai_client, valid_emails, model_name="gemini-2.5-flash"):
+def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
     """
        对已验证的有效邮件内容进行 AI 总结。
 
        Args:
            ai_client: 已经初始化的 genai.Client 实例。
-           valid_emails: 待处理的邮件字典列表。
+           emails: 待处理的邮件字典列表。
            model_name: 使用的模型名称
 
        Returns:
@@ -196,7 +196,7 @@ def get_summary_for_valid_emails(ai_client, valid_emails, model_name="gemini-2.5
 
     print("开始生成有效邮件内容总结")
 
-    for email_data in valid_emails:
+    for email_data in emails:
 
         subject = email_data.get('subject', '无主题')
         body = email_data.get('body', '无正文')
