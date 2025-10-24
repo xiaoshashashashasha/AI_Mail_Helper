@@ -157,7 +157,7 @@ def get_score_for_uncertain_emails(ai_client, uncertain_emails, model_name="gemi
 
         # 6. 将邮件数据和评分添加到结果列表和判断列表中
         email_data['judge_time'] = datetime.now(TIMEZONE).isoformat()
-        judge_list.append(email_data)
+        judge_list.append(email_data.copy())
 
         # 若为无效邮件，则在结果中去除总结部分再输出
         if  email_data['score'] < VALID_SCORE:
@@ -173,7 +173,7 @@ def get_score_for_uncertain_emails(ai_client, uncertain_emails, model_name="gemi
     return result_list
 
 
-# --- 有效邮件总结 ---
+# --- 邮件总结 ---
 def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
     """
        对已验证的有效邮件内容进行 AI 总结。
@@ -184,7 +184,7 @@ def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
            model_name: 使用的模型名称
 
        Returns:
-           list: 包含已更新 summary 和 summary_time 字段的邮件字典列表。
+           list: 包含已更新 summary 字段的邮件字典列表。
        """
 
     result_list = []
@@ -201,6 +201,12 @@ def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
         subject = email_data.get('subject', '无主题')
         body = email_data.get('body', '无正文')
 
+        sender_display = (
+                email_data.get('sender_name') or
+                email_data.get('sender') or
+                f"[Root: {email_data.get('sender_root', '未知根域名')}]"
+        )
+
         # --- 1. 构造最终 Prompt ---
         final_prompt = (
                 SYSTEM_PROMPT + "\n\n" +
@@ -212,7 +218,6 @@ def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
                 RESPONSE_INSTRUCTION
         )
 
-        summary = "AI总结失败或未总结"
 
         try:
             # 2. 调用 Gemini API
@@ -234,16 +239,16 @@ def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
             # 4. 更新邮件数据字典
             email_data['summary'] = summary
 
-            print(f"  AI SUMMARY SUCCESS -> 地址: {email_data.get('sender_name', '未知发送者')}, 总结: {summary}")
+            print(f"  AI SUMMARY SUCCESS -> 地址: {sender_display}, 总结: {summary}")
 
         except Exception as e:
             # 5. 处理 API 失败或 JSON 解析失败
             email_data['summary'] = f"AI处理失败: {e}"
-            print(f"  AI SUMMARY FAIL -> 地址: {email_data.get('sender_name', '未知发送者')}, 错误: {e}")
+            print(f"  AI SUMMARY FAIL -> 地址: {sender_display}, 错误: {e}")
 
         # 记录总结处理时间
         email_data['judge_time'] = datetime.now(TIMEZONE).isoformat()
-        judge_list.append(email_data)
+        judge_list.append(email_data.copy())
 
         # 6. 将处理后的邮件数据添加到结果列表
         email_data.pop('judge_time',None)
