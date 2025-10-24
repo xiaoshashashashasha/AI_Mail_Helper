@@ -155,6 +155,10 @@ def fetch_unseen_emails(mclient, json_file_path=IN_RAWDATA_OUTPUT_PATH):
             display_name, email_addr = parseaddr(sender)
             sender_name, sender_root = email_addr.split('@')
 
+        to_recipients = []
+        for email_addr in to:
+            name, root = email_addr.split('@')
+            to_recipients.append({'to_name': name, 'to_root': root})
 
         # 结构化返回信息
         emails.append({
@@ -162,7 +166,7 @@ def fetch_unseen_emails(mclient, json_file_path=IN_RAWDATA_OUTPUT_PATH):
             'id': email_id.decode(),
             'sender_root': sender_root,
             'sender_name': sender_name,
-            'to': to,
+            'to': to_recipients,
             'cc': cc,
             'subject': subject,
             'sent_time': sent_time_jst,
@@ -282,12 +286,17 @@ def fetch_sent_emails(mclient, json_file_path=SENT_RAWDATA_OUTPUT_PATH):
 
         display_name, email_addr = parseaddr(sender)
 
+        to_recipients = []
+        for email_addr in to:
+            name, root = email_addr.split('@')
+            to_recipients.append({'to_name': name, 'to_root': root})
+
         # 结构化返回信息
         emails.append({
             'type': 'sent',
             'id': email_id.decode(),
             'sender': email_addr,
-            'to': to,
+            'to': to_recipients,
             'cc': cc,
             'subject': subject,
             'sent_time': sent_time_jst,
