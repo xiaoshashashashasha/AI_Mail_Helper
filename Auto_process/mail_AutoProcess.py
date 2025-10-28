@@ -10,7 +10,7 @@ from email.utils import parseaddr
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from google import genai
-from Utils.util import datetime_to_json, extract_text_from_html, get_address_list_from_header
+from Utils.util import datetime_to_json, extract_text_from_html, get_address_list_from_header, archive_email_to_memory
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MAIL_CONFIG_FILE = os.path.join(CURRENT_DIR, "../Configs/Setup/mail_config.json")
@@ -21,6 +21,7 @@ SCORE_LIST_PATH = os.path.join(CURRENT_DIR, "../Info/email_sender_score_list.jso
 VALID_MAIL_OUTPUT_PATH = os.path.join(CURRENT_DIR, "../Info/valid_emails.json")
 INVALID_MAIL_OUTPUT_PATH = os.path.join(CURRENT_DIR, "../Info/invalid_emails.json")
 SENT_MAIL_OUTPUT_PATH = os.path.join(CURRENT_DIR, "../Info/sent_emails.json")
+CONVERSATION_MEMORY_PATH = os.path.join(CURRENT_DIR, "../Info/conversation_memory.json")
 
 # 读取邮箱配置
 try:
@@ -39,6 +40,7 @@ IMAP_PORT = EMAIL_CONFIG['IMAP_PORT']
 EMAIL_ADDRESS = EMAIL_CONFIG['EMAIL_ADDRESS']
 APP_PASSWORD = EMAIL_CONFIG['APP_PASSWORD']
 VALID_SCORE = EMAIL_CONFIG['THRESHOLD']['VALID_SCORE']
+NO_REPLY_PATTERN = EMAIL_CONFIG['NO_REPLY_PATTERNS']
 
 # --- 时区设置 ---
 TIMEZONE_STR = EMAIL_CONFIG['TIME_AREA'] + "/" + EMAIL_CONFIG['TIME_NATION']
@@ -155,10 +157,6 @@ def fetch_unseen_emails(mclient, json_file_path=IN_RAWDATA_OUTPUT_PATH):
             display_name, email_addr = parseaddr(sender)
             sender_name, sender_root = email_addr.split('@')
 
-        to_recipients = []
-        for email_addr in to:
-            name, root = email_addr.split('@')
-            to_recipients.append({'to_name': name, 'to_root': root})
 
         # 结构化返回信息
         emails.append({
@@ -166,7 +164,7 @@ def fetch_unseen_emails(mclient, json_file_path=IN_RAWDATA_OUTPUT_PATH):
             'id': email_id.decode(),
             'sender_root': sender_root,
             'sender_name': sender_name,
-            'to': to_recipients,
+            'receiver': to,
             'cc': cc,
             'subject': subject,
             'sent_time': sent_time_jst,
@@ -286,17 +284,13 @@ def fetch_sent_emails(mclient, json_file_path=SENT_RAWDATA_OUTPUT_PATH):
 
         display_name, email_addr = parseaddr(sender)
 
-        to_recipients = []
-        for email_addr in to:
-            name, root = email_addr.split('@')
-            to_recipients.append({'to_name': name, 'to_root': root})
 
         # 结构化返回信息
         emails.append({
             'type': 'sent',
             'id': email_id.decode(),
             'sender': email_addr,
-            'to': to_recipients,
+            'receiver': to,
             'cc': cc,
             'subject': subject,
             'sent_time': sent_time_jst,
@@ -351,11 +345,13 @@ def email_classification(ai_client, in_emails, sent_emails, invalid_output_path=
     invalid_emails = []
     uncertain_emails = []
 
+    if not len(sent_emails) > 0:
+        sent_emails = []
 
 
     if not (in_emails or sent_emails):
         print("无邮件需要分类")
-        return []
+        return valid_emails, sent_emails
 
     # 收到邮件处理
     if len(in_emails) > 0:
@@ -495,11 +491,9 @@ def email_classification(ai_client, in_emails, sent_emails, invalid_output_path=
                 print(f"SUCCESS: {len(valid_emails)} 封邮件被标记为有效邮件，将在处理后写入 {valid_output_path},并用于记忆构成")
 
 
-
-
-
     # 发送邮件处理
     if len(sent_emails) > 0:
+        sent_bol = True
         print(f"SUCCESS: {len(sent_emails)} 封已发送邮件将交由AI总结内容")
         # 交由AI进行总结
         AI_Handler.get_summary_for_emails(ai_client, sent_emails, MODEL_NAME)
@@ -528,14 +522,272 @@ def email_classification(ai_client, in_emails, sent_emails, invalid_output_path=
 
     return valid_emails, sent_emails
 
+
+# --- 根据历史邮件构建对话历史 ---
+def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT_PATH,
+                              all_sent_emails_path=SENT_MAIL_OUTPUT_PATH, memory_file_path=CONVERSATION_MEMORY_PATH):
+    print("对话历史初始化...")
+
+    # --- 1. (约束检查) 仅能在对话历史为空时执行 ---
+    if os.path.exists(memory_file_path):
+        try:
+            # 检查文件大小 > 10 字节 (防止只是一个 "{}")
+            if os.path.getsize(memory_file_path) > 10:
+                with open(memory_file_path, 'r', encoding='utf-8') as f:
+                    content = json.load(f)
+                # 检查内容是否为空
+                if content:
+                    print(f"错误：对话历史文件 {memory_file_path} 已存在且不为空。初始化被终止。")
+                    print("如需强制重新初始化，请手动删除该文件。")
+                    return
+        except Exception as e:
+            print(f"警告：对话历史文件 {memory_file_path} 存在但无法解析({e})。为安全起见，初始化被终止。")
+            return
+
+    print(f"信息：对话历史文件为空，开始从历史邮件构建...")
+
+    # --- 2. 加载所有历史邮件 ---
+    try:
+        with open(all_valid_emails_path, 'r', encoding='utf-8') as f:
+            all_valid_emails = json.load(f)
+        with open(all_sent_emails_path, 'r', encoding='utf-8') as f:
+            all_sent_emails = json.load(f)
+    except FileNotFoundError as e:
+        print(f"FATAL: 找不到历史邮件文件 {e.filename}。初始化失败。")
+        return
+    except Exception as e:
+        print(f"FATAL: 无法读取历史邮件文件: {e}")
+        return
+
+    print(f"信息：已加载 {len(all_valid_emails)} 封收信和 {len(all_sent_emails)} 封发信。")
+
+    # --- 3. (统一格式化) 处理 valid_emails (收信) ---
+    formatted_valid_emails = []
+    if len(all_valid_emails) > 0:
+        print(f"开始对 {len(all_valid_emails)} 封历史收信进行格式化...")
+        for email in all_valid_emails:
+            # (地址清洗) 检查 NO_REPLY
+            if any(pattern in email.get("sender_name", "").lower() for pattern in NO_REPLY_PATTERN):
+                continue
+
+            # (格式化)
+            sender_addr = email.get("sender_name", "unknown") + "@" + email.get("sender_root", "unknown.com")
+
+            if not sender_addr or sender_addr == "unknown@unknown.com":
+                continue  # 跳过无法识别的邮件
+
+            email["sender"] = sender_addr
+            email.pop("sender_name", None)
+            email.pop("sender_root", None)
+            email.pop("score", None)
+
+            formatted_valid_emails.append(email)
+        print(f"信息：历史收信格式化完成，{len(formatted_valid_emails)} 封邮件有效。")
+
+    # --- 4. (统一格式化) 处理 sent_emails (发信) ---
+    formatted_sent_emails = []
+    if len(all_sent_emails) > 0:
+        for email in all_sent_emails:
+            receivers = email.get("receiver")
+            if not isinstance(receivers, list) or not receivers:
+                continue
+            formatted_sent_emails.append(email)
+
+    # --- 5. (慢速通道) 运行 AI 清洗 (针对所有收信) ---
+    # 在 init 模式下, *所有* 收信都必须通过 AI 验证
+
+    if formatted_valid_emails:
+        print(f"信息：正在提交 {len(formatted_valid_emails)} 封历史收信到 AI 进行内容清洗...")
+        print("(这可能需要很长时间，取决于邮件数量...)")
+
+        # (a. 提交给 AI)
+        final_valid_emails = AI_Handler.get_conversation_constitutes_for_emails(
+            ai_client, formatted_valid_emails
+        )
+        print(f"信息：AI 清洗完成，{len(final_valid_emails)} 封邮件被确认为对话。")
+    else:
+        final_valid_emails = []
+
+    # --- 6. (归档) ---
+    # (发信总是被视为对话，无需 AI 过滤)
+    all_emails_to_archive = formatted_sent_emails + final_valid_emails
+
+    if not all_emails_to_archive:
+        print("警告：没有可用于归档的邮件。初始化终止。")
+        return
+
+    print(f"信息：开始归档 {len(all_emails_to_archive)} 封最终邮件...")
+
+    all_memory = {}  # (初始化：从空字典开始)
+    new_email_added_count = 0
+    processed_ids_this_run = set()
+
+    for email in all_emails_to_archive:
+        new_email_added_count += archive_email_to_memory(
+            email, all_memory, processed_ids_this_run
+        )
+
+    print(f"信息：归档完成。总共添加了 {new_email_added_count} 封邮件到 {len(all_memory)} 条对话中。")
+
+    # --- 7. (排序与保存) ---
+    print("信息：正在对所有对话进行时间排序...")
+    for email_list in all_memory.values():
+        if not isinstance(email_list, list): continue
+        try:
+            email_list.sort(key=lambda x: x.get("sent_time", "1970-01-01T00:00:00Z"))
+        except Exception as e:
+            print(f"警告：对话 {e} 排序失败。")
+
+    try:
+        with open(memory_file_path, 'w', encoding='utf-8') as f:
+            json.dump(all_memory, f, ensure_ascii=False, indent=2)
+        print(f"信息：对话历史已成功初始化并保存到 {memory_file_path}")
+    except Exception as e:
+        print(f"错误：保存对话历史文件失败 ({e})")
+
+    print("对话历史初始化完成。")
+
+
 # --- 根据获取的有效邮件维护对话历史 ---
-def maintain_conversation_history(valid_emails):
-    print("对话历史维护")
-    # 具体实现：
-    # 1.根据邮件内容判断是否可能为对话邮件
-    # 2.根据往来域名确认对话双方
-    # 3.逐一检查邮件内容是否与该交流组的对话内的各对话相关
-    # 4.若相关，则归入该对话中；不相关，则在该交流组内创建新的对话
+def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_file_path=CONVERSATION_MEMORY_PATH):
+    # 步骤：
+    # 1. 读取对话历史 (all_memory, existing_ids, existing_addresses)
+    # 2. (统一格式化) 对 valid_emails 进行地址清洗和数据格式化
+    # 3. (统一格式化) 筛选 sent_emails
+    # 4. 将格式化后的邮件分流 (快/慢通道)
+    # 5. (慢速通道) 运行 AI 清洗
+    # 6. (归档) 将 快通道 + AI清洗后的慢通道 邮件统一归档
+    # 7. 排序并保存
+
+    if not (valid_emails or sent_emails):
+        print("无可用于对话历史维护的邮件")
+        return
+
+    # --- 1. 读取对话历史记录 ---
+    all_memory = {}
+    try:
+        if os.path.exists(memory_file_path) and os.path.getsize(memory_file_path) > 0:
+            with open(memory_file_path, 'r', encoding='utf-8') as f:
+                all_memory = json.load(f)
+                if not isinstance(all_memory, dict):
+                    all_memory = {}
+    except Exception as e:
+        print(f"警告：读取现有对话历史文件失败 ({e})，将从零开始构建。")
+        all_memory = {}
+
+    existing_ids = set()
+    for email_list in all_memory.values():
+        if not isinstance(email_list, list): continue
+        for email in email_list:
+            if email and email.get("id"):
+                existing_ids.add(email.get("id"))
+
+    existing_addresses = set(all_memory.keys())
+    print(f"信息：已加载 {len(existing_ids)} 个邮件ID 和 {len(existing_addresses)} 条已有对话。")
+
+    # --- 2. (统一格式化) 处理 valid_emails (收信) ---
+    formatted_valid_emails = []
+    if len(valid_emails) > 0:
+        print(f"开始对 {len(valid_emails)} 封收信进行格式化...")
+        for email in valid_emails:
+            # (去重) 检查是否已在 memory 中
+            if email.get("id") and email.get("id") in existing_ids:
+                continue
+
+            # (地址清洗) 检查 NO_REPLY
+            if any(pattern in email.get("sender_name", "").lower() for pattern in NO_REPLY_PATTERN):
+                continue
+
+            # (格式化)
+            sender_addr = email.get("sender_name", "unknown") + "@" + email.get("sender_root", "unknown.com")
+
+            if not sender_addr or sender_addr == "unknown@unknown.com":
+                print(f"警告：(收信) 邮件 {email.get('id')} 无法确定发件人地址，跳过。")
+                continue
+
+            email["sender"] = sender_addr
+            email.pop("sender_name", None)
+            email.pop("sender_root", None)
+            email.pop("score", None)
+
+            formatted_valid_emails.append(email)
+        print(f"信息：收信格式化完成，{len(formatted_valid_emails)} 封邮件有效。")
+
+    # --- 3. (统一格式化) 处理 sent_emails (发信) ---
+    formatted_sent_emails = []
+    if len(sent_emails) > 0:
+        for email in sent_emails:
+            # (去重) 检查是否已在 memory 中
+            if email.get("id") and email.get("id") in existing_ids:
+                continue
+
+            receivers = email.get("receiver")
+            if not isinstance(receivers, list) or not receivers:
+                print(f"警告：(发信) 邮件 {email.get('id')} 缺少收件人，跳过。")
+                continue
+
+            formatted_sent_emails.append(email)
+
+    # --- 4. 将格式化后的邮件分流 ---
+    emails_to_add_fast = []  # 快速通道
+    emails_to_filter_slow = []  # 慢速通道
+
+    # (分流收信)
+    for email in formatted_valid_emails:
+        if email["sender"] in existing_addresses:
+            emails_to_add_fast.append(email)
+        else:
+            emails_to_filter_slow.append(email)
+
+    # (分流发信 - 总是快速)
+    emails_to_add_fast.extend(formatted_sent_emails)
+
+    print(f"信息：邮件分流完成。快速通道: {len(emails_to_add_fast)} 封，慢速(AI)通道: {len(emails_to_filter_slow)} 封。")
+
+    # --- 5. (慢速通道) 运行 AI 清洗 ---
+    if emails_to_filter_slow:
+        print(f"信息：正在提交 {len(emails_to_filter_slow)} 封新邮件到 AI 进行内容清洗...")
+
+        # (a. 提交给 AI)
+        filtered_new_emails = AI_Handler.get_conversation_constitutes_for_emails(
+            ai_client, emails_to_filter_slow
+        )
+
+        print(f"信息：AI 清洗完成，{len(filtered_new_emails)} 封邮件被确认为新对话。")
+
+        # (b. 将 AI 过滤后的结果添加到 "快速通道" 准备归档)
+        emails_to_add_fast.extend(filtered_new_emails)
+
+    # --- 6. (归档) ---
+    print(f"信息：开始归档 {len(emails_to_add_fast)} 封最终邮件...")
+    new_email_added_count = 0
+    # (用于处理 "sent" 邮件只被计数一次)
+    processed_ids_this_run = set()
+
+    for email in emails_to_add_fast:
+        new_email_added_count += archive_email_to_memory(
+            email, all_memory, processed_ids_this_run
+        )
+
+    print(f"信息：归档完成。总共添加了 {new_email_added_count} 封新邮件。")
+
+    # --- 7. (排序与保存) ---
+    print("信息：正在对所有对话进行时间排序...")
+    for email_list in all_memory.values():
+        if not isinstance(email_list, list): continue
+        try:
+            email_list.sort(key=lambda x: x.get("sent_time", "1970-01-01T00:00:00Z"))
+        except Exception as e:
+            print(f"警告：对话 {e} 排序失败。")
+
+    try:
+        with open(memory_file_path, 'w', encoding='utf-8') as f:
+            json.dump(all_memory, f, ensure_ascii=False, indent=2)
+        print(f"信息：对话历史已成功保存到 {memory_file_path}")
+    except Exception as e:
+        print(f"错误：保存对话历史文件失败 ({e})")
+
+    print("对话历史维护完成。")
 
 
 # --- 周期获取新增邮件并解析处理 ---
@@ -552,13 +804,13 @@ def auto_process(mclient, ai_client):
     #   根据AI的评分维护邮件地址评价文件,
     #   对有效邮件的type类型进行映射获取邮件属性，完善其数据结构并存储到json中，
     #   总结后的完整邮件信息将用于维护对话记忆表。
-    valid_emails = email_classification(ai_client, fetched_in_emails, fetched_sent_emails)
+    valid_emails, sent_emails = email_classification(ai_client, fetched_in_emails, fetched_sent_emails)
 
     # 遍历有效邮件查看是否构成对话,若构成则检查对话历史,若存在则完善对话过程,不存在则建立新的对话历史
-    maintain_conversation_history(valid_emails)
+    maintain_conversation_history(ai_client, valid_emails, sent_emails)
 
 
-    return valid_emails
+    return valid_emails, sent_emails
 
 if __name__ == '__main__':
 
@@ -566,6 +818,7 @@ if __name__ == '__main__':
     mclient = connect_and_login_email()
     ai_client = connect_gemini()
 
+    init_conversation_history(ai_client)
     auto_process(mclient, ai_client)
 
 
