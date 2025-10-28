@@ -22,7 +22,7 @@ except json.JSONDecodeError:
 
 CLASSIFICATION_PROMPT = prompt_file["CLASSIFICATION"]
 SUMMARY_PROMPT = prompt_file["SUMMARY"]
-
+CONVO_PROMPT = prompt_file["CONVERSATION"]
 
 # --- 辅助函数：重试机制 (用于处理 API 错误) ---
 def retry_gemini_call(func, *args, max_retries=3, delay=5, **kwargs):
@@ -41,12 +41,13 @@ def retry_gemini_call(func, *args, max_retries=3, delay=5, **kwargs):
 
 
 # --- 邮件记录保存函数 ---
-def save_mail_judgment_record(new_records):
+def save_mail_judgment_record(new_records, judgment_type):
     """
     读取现有邮件判断记录，追加新记录，并写入文件，避免覆盖。
 
     Args:
         new_records (list): 包含AI评分和总结的邮件字典列表。
+        judgment_type (string): 该次判断类型
     """
 
     # 1. 读取现有记录
@@ -68,6 +69,8 @@ def save_mail_judgment_record(new_records):
         existing_records = []
 
     # 2. 合并记录
+    for new_record in new_records:
+        new_record["judgment_type"] = judgment_type
     combined_records = existing_records + new_records
 
     # 3. 写入文件
@@ -168,7 +171,7 @@ def get_score_for_uncertain_emails(ai_client, uncertain_emails, model_name="gemi
 
     # 将数据结构完备的判断记录存储到../Info/mail_judgement_record.json中
     if judge_list:
-        save_mail_judgment_record(judge_list)
+        save_mail_judgment_record(judge_list, "classification")
 
     return result_list
 
@@ -256,6 +259,122 @@ def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
 
     # 将数据结构完备的判断记录存储到../Info/mail_judgement_record.json中
     if judge_list:
-        save_mail_judgment_record(judge_list)
+        save_mail_judgment_record(judge_list,"get_summary")
+
+    return result_list
+
+
+# --- 对话邮件筛选 ---
+def get_conversation_constitutes_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
+    """
+    [AI-Powered] 使用 AI 进一步筛选邮件，判断其是否构成真实对话（排除系统通知、报告等）。
+    此函数 *不* 依赖 classification 的 score，而是进行独立的、更精确的 AI 判断。
+
+    Args:
+        ai_client: 已经初始化的 genai.Client 实例。
+        emails: 待处理的邮件字典列表。
+        model_name: 使用的模型名称
+
+    Returns:
+        list: 仅包含被 AI 判断为 "对话型" 的邮件字典列表。
+    """
+
+    # result_list: 最终返回的、确认是“对话”的邮件
+    result_list = []
+    # judge_list: 包含所有处理记录的日志（无论是否被过滤）
+    judge_list = []
+
+    # --- 1. 加载 Prompts ---
+    try:
+        SYSTEM_PROMPT = CONVO_PROMPT.get("SYSTEM_PROMPT", "")
+        CONVO_TASK = CONVO_PROMPT.get("CONVO_TASK", "")
+        RESPONSE_INSTRUCTION = CONVO_PROMPT.get("RESPONSE_FORMAT_INSTRUCTION", "")
+    except KeyError:
+        print(f"FATAL: 配置文件 {PROMPT_FILE_PATH} 中缺少 'CONVERSATION' 键。")
+        print("警告：由于 Prompt 缺失，将跳过 AI 对话筛选，保留所有邮件。")
+        return emails
+    except Exception as e:
+        print(f"FATAL: 加载 CONVERSATION prompt 失败: {e}")
+        return emails
+
+    print("开始进行 AI 对话邮件筛选 (第二阶段)...")
+
+    for email_data in emails:
+        # 创建一个副本用于日志记录
+        judge_record = email_data.copy()
+
+        subject = email_data.get('subject', '无主题')
+        body = email_data.get('body', '无正文')
+
+        sender_display = (
+                email_data.get('sender',"未知域名")
+        )
+
+        # --- 2. 构造最终 Prompt ---
+        final_prompt = (
+                SYSTEM_PROMPT + "\n\n" +
+                CONVO_TASK + "\n\n" +
+                f"邮件主题：{subject}\n" +
+                f"邮件正文（仅前1000字）：{body[:1000]}\n\n" +
+                RESPONSE_INSTRUCTION
+        )
+
+        # 默认为 True (安全起见: 宁可错误地保留一封通知，也不要错误地过滤一封真邮件)
+        is_conversation = True
+        ai_error_note = None
+        judgment_reason = "N/A"
+
+        try:
+            # --- 3. 调用 Gemini API ---
+            response = retry_gemini_call(
+                ai_client.models.generate_content,
+                model=model_name,
+                contents=final_prompt,
+                config={
+                    "response_mime_type": "application/json"
+                }
+            )
+
+            # --- 4. 解析 JSON 结果 ---
+            result = json.loads(response.text)
+
+            # (安全地获取布尔值)
+            is_conversation_raw = result.get('is_conversation', True)
+            is_conversation = str(is_conversation_raw).lower() == 'true'
+
+            judgment_reason = result.get('reason', 'AI未提供理由')
+
+            if is_conversation:
+                print(f"  AI CONVO_CHECK -> (保留) 地址: {sender_display}, 理由: {judgment_reason}")
+            else:
+                print(f"  AI CONVO_CHECK -> (过滤) 地址: {sender_display}, 理由: {judgment_reason}")
+
+        except Exception as e:
+            # --- 5. 处理 API 失败 ---
+            is_conversation = True  # 安全默认值: 保留
+            ai_error_note = f"AI判断对话失败: {e}"
+            judgment_reason = "AI判断失败"
+            print(f"  AI CONVO_FAIL -> (保留) 地址: {sender_display}, 错误: {e}")
+
+        # --- 6. 记录判断日志 ---
+        judge_record['judge_time'] = datetime.now(TIMEZONE).isoformat()
+        judge_record['is_conversation_judgment'] = is_conversation  # 记录AI的判断
+        judge_record['judgment_reason'] = judgment_reason  # 记录AI的理由
+        if ai_error_note:
+            judge_record['ai_error'] = ai_error_note  # 记录错误
+
+        # 将日志副本添加到 judge_list
+        judge_list.append(judge_record)
+
+        # --- 7. 构建最终返回列表 ---
+        if is_conversation:
+            # 添加原始邮件数据
+            result_list.append(email_data)
+
+    # --- 8. 保存判断记录 ---
+    if judge_list:
+        save_mail_judgment_record(judge_list, "conversation_check")
+
+    print(f"AI 对话筛选完成： {len(emails)} 封邮件中，{len(result_list)} 封被保留为对话邮件。")
 
     return result_list

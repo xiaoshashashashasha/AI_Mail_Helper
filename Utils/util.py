@@ -102,3 +102,49 @@ def get_address_list_from_header(headers):
 
     # addresses 是一个 (display_name, email_address) 元组的列表
     return [email_addr for display_name, email_addr in addresses if email_addr]
+
+
+# --- 辅助函数 (用于归档, 避免重复代码) ---
+def archive_email_to_memory(email, all_memory, processed_ids_this_run):
+    """
+    将一封已格式化的邮件归档到 all_memory 字典中。
+    处理 received 和 sent 两种情况, 并处理ID去重。
+    """
+    email_id = email.get("id")
+
+    # 检查此邮件是否 *在本次运行中* 已被添加
+    # (这主要用于防止一封“已发送”邮件被多次计数)
+    if email_id and email_id in processed_ids_this_run:
+        return 0  # 已添加, 返回 0
+
+    other_party_addresses = []
+    email_type = email.get("type")
+
+    if email_type == "received":
+        # (已在 Step 2 中格式化)
+        if email.get("sender"):
+            other_party_addresses.append(email["sender"])
+
+    elif email_type == "sent":
+        receivers = email.get("receiver")
+        if isinstance(receivers, list):
+            other_party_addresses.extend(receivers)
+
+    if not other_party_addresses:
+        print(f"警告：邮件 {email_id} 无法确定归档地址，跳过。")
+        return 0
+
+    # 将邮件添加到所有相关的对方地址下
+    for address in set(other_party_addresses):
+        if not address: continue
+
+        if address not in all_memory:
+            all_memory[address] = []
+
+        # (我们假设此邮件的 ID 已经通过了 existing_ids 的检查)
+        all_memory[address].append(email)
+
+    if email_id:
+        processed_ids_this_run.add(email_id)  # 标记此ID在本次运行中已处理
+
+    return 1  # 成功添加 1 封
