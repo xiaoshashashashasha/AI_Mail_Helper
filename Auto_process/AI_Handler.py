@@ -3,12 +3,15 @@ import os
 import time
 
 from datetime import datetime
-from Auto_process.mail_AutoProcess import VALID_SCORE, CURRENT_DIR
+from Auto_process.mail_AutoProcess import VALID_SCORE, CURRENT_DIR, AI_CONFIG
 from Auto_process.mail_AutoProcess import TIMEZONE
 from Utils.util import datetime_to_json
 
 PROMPT_FILE_PATH = os.path.join(CURRENT_DIR, "../Configs/Prompt_config.json")
 JUDGMENT_RECORD_PATH = os.path.join(CURRENT_DIR, "../Info/mail_judgement_record.json")
+
+# ---AI API访问频率限制 ---
+SECONDS_BETWEEN_REQUESTS = AI_CONFIG['SECONDS_BETWEEN_REQUESTS']
 
 try:
     with open(PROMPT_FILE_PATH, 'r', encoding='utf-8') as f:
@@ -169,6 +172,8 @@ def get_score_for_uncertain_emails(ai_client, uncertain_emails, model_name="gemi
         email_data.pop('judge_time',None)
         result_list.append(email_data)
 
+        time.sleep(SECONDS_BETWEEN_REQUESTS)
+
     # 将数据结构完备的判断记录存储到../Info/mail_judgement_record.json中
     if judge_list:
         save_mail_judgment_record(judge_list, "classification")
@@ -257,6 +262,8 @@ def get_summary_for_emails(ai_client, emails, model_name="gemini-2.5-flash"):
         email_data.pop('judge_time',None)
         result_list.append(email_data)
 
+        time.sleep(SECONDS_BETWEEN_REQUESTS)
+
     # 将数据结构完备的判断记录存储到../Info/mail_judgement_record.json中
     if judge_list:
         save_mail_judgment_record(judge_list,"get_summary")
@@ -319,7 +326,7 @@ def get_conversation_constitutes_for_emails(ai_client, emails, model_name="gemin
                 RESPONSE_INSTRUCTION
         )
 
-        # 默认为 True (安全起见: 宁可错误地保留一封通知，也不要错误地过滤一封真邮件)
+        # 默认为 True
         is_conversation = True
         ai_error_note = None
         judgment_reason = "N/A"
@@ -370,6 +377,8 @@ def get_conversation_constitutes_for_emails(ai_client, emails, model_name="gemin
         if is_conversation:
             # 添加原始邮件数据
             result_list.append(email_data)
+
+        time.sleep(SECONDS_BETWEEN_REQUESTS)
 
     # --- 8. 保存判断记录 ---
     if judge_list:
