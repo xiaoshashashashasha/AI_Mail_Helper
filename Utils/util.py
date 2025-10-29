@@ -1,14 +1,42 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import getaddresses
 from html.parser import HTMLParser
 
+MIN_AWARE_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
 
 # --- 将 datetime 对象转换为可序列化的字符串 ---
 def datetime_to_json(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def get_sortable_time(email_data):
+    """
+    一个健壮的排序键，
+    可处理 sent_time 是 str、datetime 或 None 的情况。
+    """
+
+    sent_time = email_data.get("sent_time")
+
+    if isinstance(sent_time, datetime):
+        # 如果是 datetime，确保它有TzInfo
+        if sent_time.tzinfo is None:
+            # 假设 naive (无时区) 的时间是 UTC
+            return sent_time.replace(tzinfo=timezone.utc)
+        return sent_time  # 它已是 datetime 对象, 直接返回
+
+    if isinstance(sent_time, str):
+        try:
+            # 尝试将其从 ISO 字符串转为 datetime 对象
+            return datetime.fromisoformat(sent_time)
+        except (ValueError, TypeError):
+            # 如果字符串格式错误，返回一个最小值
+            return MIN_AWARE_DATETIME
+
+    # 如果 sent_time 是 None 或其他类型, 返回最小值
+    return MIN_AWARE_DATETIME
 
 
 # --- HTML 文本提取器 ---
