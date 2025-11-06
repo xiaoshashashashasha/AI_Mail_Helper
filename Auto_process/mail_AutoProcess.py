@@ -2,10 +2,12 @@ import imaplib
 import email
 import json
 import os
+import threading
 import pytz
 import AI_Handler
+import time as time_module
 
-from datetime import datetime
+from datetime import datetime, time
 from email.utils import parseaddr
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
@@ -536,11 +538,11 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
                 with open(memory_file_path, 'r', encoding='utf-8') as f:
                     content = json.load(f)
                 if content:
-                    print(f"错误：对话历史文件 {memory_file_path} 已存在且不为空。初始化被终止。")
+                    print(f"信息：对话历史文件 {memory_file_path} 已存在且不为空。终止初始化。")
                     print("//////////////////对话历史初始化终止。//////////////////\n")
                     return
         except Exception as e:
-            print(f"警告：对话历史文件 {memory_file_path} 存在但无法解析({e})。初始化被终止。")
+            print(f"警告：对话历史文件 {memory_file_path} 存在但无法解析({e})。终止初始化。")
             print("//////////////////对话历史初始化终止。//////////////////\n")
             return
 
@@ -592,9 +594,7 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
         print(f"信息：历史收信格式化完成，{len(formatted_valid_emails)} 封邮件有效。")
 
     # --- 5. (分流) ---
-    # (在 init 模式下, existing_addresses_from_memory 是空的)
     known_addresses = addresses_from_sent_mail
-
     emails_to_add_fast = []  # 快速通道
     emails_to_filter_slow = []  # 慢速通道
 
@@ -604,7 +604,6 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
         else:
             emails_to_filter_slow.append(email)
 
-    # 发信总是快速通道
     emails_to_add_fast.extend(formatted_sent_emails)
     print(f"信息：邮件分流完成。快速通道: {len(emails_to_add_fast)} 封，慢速(AI)通道: {len(emails_to_filter_slow)} 封。")
 
@@ -617,7 +616,6 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
             ai_client, emails_to_filter_slow
         )
         print(f"信息：AI 清洗完成，{len(filtered_new_emails)} 封邮件被确认为新对话。")
-        # 添加到待归档列表
         emails_to_add_fast.extend(filtered_new_emails)
     else:
         print("信息：没有需要 AI 清洗的邮件。")
@@ -631,7 +629,8 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
 
     print(f"信息：开始归档 {len(all_emails_to_archive)} 封最终邮件...")
 
-    all_memory = {}  # (初始化：从空字典开始)
+    # (注意：all_memory 此时是旧的数据结构: {"address": [email_list]})
+    all_memory = {}
     new_email_added_count = 0
     processed_ids_this_run = set()
 
@@ -642,7 +641,8 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
 
     print(f"信息：归档完成。总共添加了 {new_email_added_count} 封邮件到 {len(all_memory)} 条对话中。")
 
-    # --- 8. (排序与保存) ---
+    # --- 8. (排序、生成总结并保存) ---
+
     print("信息：正在对所有对话进行时间排序...")
     for email_list in all_memory.values():
         if not isinstance(email_list, list): continue
@@ -651,9 +651,13 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
         except Exception as e:
             print(f"警告：对话 {e} 排序失败。")
 
+    print("信息：调用AI为所有对话生成总体总结...")
+    final_memory_structure = AI_Handler.get_history_summary_for_conversation(ai_client, all_memory)
+
     try:
         with open(memory_file_path, 'w', encoding='utf-8') as f:
-            json.dump(all_memory, f, ensure_ascii=False, indent=2, default=datetime_to_json)
+            # (保存最终的新结构)
+            json.dump(final_memory_structure, f, ensure_ascii=False, indent=2, default=datetime_to_json)
         print(f"信息：对话历史已成功初始化并保存到 {memory_file_path}")
     except Exception as e:
         print(f"错误：保存对话历史文件失败 ({e})")
@@ -664,20 +668,23 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
 # --- 根据获取的有效邮件维护对话历史 ---
 def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_file_path=CONVERSATION_MEMORY_PATH):
     # 步骤：
-    # 1. 读取对话历史 (all_memory, existing_ids, existing_addresses_from_memory)
-    # 2. (发信优先) 格式化 sent_emails, 并提取 all_sent_addresses
-    # 3. (发信优先) 结合 known_addresses = existing_addresses_from_memory + all_sent_addresses
+    # 1. 读取对话历史 (修正)
+    # 2. (发信优先) 格式化 sent_emails
+    # 3. (发信优先) 结合 known_addresses (修正 BUG)
     # 4. (格式化收信) 格式化 valid_emails
-    # 5. (分流) 根据 known_addresses 分流 (快/慢通道)
+    # 5. (分流)
     # 6. (慢速通道) 运行 AI 清洗
-    # 7. (归档) 将 (快通道 + AI清洗后的慢通道) 统一归档
-    # 8. 排序并保存
+    # 7. (归档) (修正) *内联* 新的归档逻辑
+    # 8. (排序) (修正) 排序新结构
+    # 9. (总结) (实现) *仅* 为 'updated_addresses' 调用 AI 总结
+    # 10. (保存)
 
     if not (valid_emails or sent_emails):
         print("无可用于对话历史维护的邮件")
         return
     print("\n//////////////////开始对话历史维护...//////////////////")
-    # --- 1. 读取对话历史记录 ---
+
+    # --- 1. 读取对话历史记录 (修正) ---
     all_memory = {}
     try:
         if os.path.exists(memory_file_path) and os.path.getsize(memory_file_path) > 0:
@@ -690,11 +697,13 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
         all_memory = {}
 
     existing_ids = set()
-    for email_list in all_memory.values():
-        if not isinstance(email_list, list): continue
-        for email in email_list:
-            if email and email.get("id"):
-                existing_ids.add(email.get("id"))
+    # (修正点: 必须遍历新结构)
+    for convo_data in all_memory.values():
+        if isinstance(convo_data, dict):
+            email_list = convo_data.get("emails", [])
+            for email in email_list:
+                if email and email.get("id"):
+                    existing_ids.add(email.get("id"))
 
     existing_addresses_from_memory = set(all_memory.keys())
     print(f"信息：已加载 {len(existing_ids)} 个邮件ID 和 {len(existing_addresses_from_memory)} 条已有对话。")
@@ -710,12 +719,11 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
             receivers = email.get("receiver")
             if not isinstance(receivers, list) or not receivers:
                 continue
-
             formatted_sent_emails.append(email)
-
             addresses_from_sent_mail.update(receivers)
 
-            # --- 3. (发信优先) 结合 "已知地址" ---
+    # --- 3. (发信优先) 结合 "已知地址" (修正 BUG) ---
+    # (BUG 修正：此行必须在 'if' 块之外，以确保 'known_addresses' 始终被定义)
     known_addresses = existing_addresses_from_memory.union(addresses_from_sent_mail)
 
     if len(addresses_from_sent_mail) > 0:
@@ -748,13 +756,11 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
     emails_to_filter_slow = []  # 慢速通道
 
     for email in formatted_valid_emails:
-
         if email["sender"] in known_addresses:
             emails_to_add_fast.append(email)
         else:
             emails_to_filter_slow.append(email)
 
-    # 发信总是快速通道
     emails_to_add_fast.extend(formatted_sent_emails)
     print(f"信息：邮件分流完成。快速通道: {len(emails_to_add_fast)} 封，慢速(AI)通道: {len(emails_to_filter_slow)} 封。")
 
@@ -765,31 +771,95 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
             ai_client, emails_to_filter_slow
         )
         print(f"信息：AI 清洗完成，{len(filtered_new_emails)} 封邮件被确认为新对话。")
-        # 添加到待归档列表
         emails_to_add_fast.extend(filtered_new_emails)
 
-    # --- 7. (归档) ---
+    # --- 7. (归档) (修正：内联逻辑，不再调用
     print(f"信息：开始归档 {len(emails_to_add_fast)} 封最终邮件...")
+
     new_email_added_count = 0
-    processed_ids_this_run = set(existing_ids)  # (修正：应使用 existing_ids 来初始化)
+    # (实现点 1: 跟踪被修改的地址，用于 Step 9)
+    addresses_that_were_updated = set()
+    # (实现点 2: 跟踪本次运行中添加的ID，用于正确计数)
+    processed_email_ids_in_this_run = set()
 
     for email in emails_to_add_fast:
+        # (Triage 步骤 (2, 4) 已经确保了 'email' 是新邮件)
 
-        new_email_added_count += archive_email_to_memory(
-            email, all_memory, processed_ids_this_run
+        email_id = email.get("id")
+        email_type = email.get("type")
+
+        other_party_addresses = []
+        if email_type == "received":
+            if email.get("sender"):
+                other_party_addresses.append(email["sender"])
+        elif email_type == "sent":
+            receivers = email.get("receiver")
+            if isinstance(receivers, list):
+                other_party_addresses.extend(receivers)
+
+        if not other_party_addresses:
+            print(f"警告：(归档) 邮件 {email_id} 无法确定归档地址，跳过。")
+            continue
+
+        # (内联归档逻辑)
+        for address in set(other_party_addresses):
+            if not address: continue
+
+            # (关键) 检查并创建 *新* 结构
+            if address not in all_memory:
+                all_memory[address] = {
+                    "general_summary": "[新对话：等待AI生成总结]",  # 临时占位符
+                    "emails": []
+                }
+
+            # (关键) 附加到 "emails" 键
+            all_memory[address]["emails"].append(email)
+            addresses_that_were_updated.add(address)  # 标记此地址需要更新总结
+
+        # (处理"新邮件"计数，防止重复计算)
+        if email_id and email_id not in processed_email_ids_in_this_run:
+            new_email_added_count += 1
+            processed_email_ids_in_this_run.add(email_id)
+        elif not email_id:
+            new_email_added_count += 1  # 总是计算没有ID的邮件
+
+    print(
+        f"信息：归档完成。总共添加了 {new_email_added_count} 封新邮件 (分布在 {len(addresses_that_were_updated)} 个对话中)。")
+
+    # --- 8. (排序) (修正) ---
+    print("信息：正在对所有受影响的对话进行时间排序...")
+    # (我们只排序被更新的列表即可，但为安全起见排序全部)
+    for address, convo_data in all_memory.items():
+        if isinstance(convo_data, dict):
+            email_list = convo_data.get("emails", [])
+            if email_list:
+                try:
+                    email_list.sort(key=get_sortable_time)
+                except Exception as e:
+                    print(f"警告：对话 {address} 排序失败: {e}")
+
+    # --- 9. (总结) (实现) ---
+    if addresses_that_were_updated:
+        print(f"信息：检测到 {len(addresses_that_were_updated)} 条对话有更新，准备调用AI更新总结...")
+
+        # (实现点: 只构建需要更新的子集)
+        memory_to_update = {}
+        for address in addresses_that_were_updated:
+            if address in all_memory:  # (安全检查)
+                memory_to_update[address] = all_memory[address]
+
+        # (调用AI，传入的 memory_to_update 是新格式)
+        updated_conversations = AI_Handler.get_history_summary_for_conversation(
+            ai_client, memory_to_update
         )
 
-    print(f"信息：归档完成。总共添加了 {new_email_added_count} 封新邮件。")
+        # (实现点: 将AI返回的新总结合并回 all_memory)
+        all_memory.update(updated_conversations)
+        print("信息：AI 总结更新完毕。")
+    else:
+        print("信息：没有检测到需要更新的对话总结。")
 
-    # --- 8. (排序与保存) ---
-    print("信息：正在对所有对话进行时间排序...")
-    for email_list in all_memory.values():
-        if not isinstance(email_list, list): continue
-        try:
-            email_list.sort(key=get_sortable_time)
-        except Exception as e:
-            print(f"警告：对话 {e} 排序失败。")
-
+    # --- 10. (保存) ---
     try:
         with open(memory_file_path, 'w', encoding='utf-8') as f:
             json.dump(all_memory, f, ensure_ascii=False, indent=2, default=datetime_to_json)
@@ -804,35 +874,105 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
 def auto_process(mclient, ai_client):
     # 获取邮箱未读邮件
     fetched_in_emails = fetch_unseen_emails(mclient)
+
     # 获取邮箱发送邮件
     fetched_sent_emails = fetch_sent_emails(mclient)
 
-    # 后续自动步骤：
-    # 识别、总结与对话的记忆
-    #   对返回的邮件信息根据域名黑名单进行初筛，保留的邮件交由AI进行总结并甄别，
-    #   识别分类-将无效邮件数据存储到json中，无法识别的列为无法识别，交由AI进行判断
-    #   根据AI的评分维护邮件地址评价文件,
-    #   对有效邮件的type类型进行映射获取邮件属性，完善其数据结构并存储到json中，
-    #   总结后的完整邮件信息将用于维护对话记忆表。
+    # 对邮件分类存储后获取经过总结的有效邮件和发送的邮件列表
     valid_emails, sent_emails = email_classification(ai_client, fetched_in_emails, fetched_sent_emails)
 
     # 遍历有效邮件查看是否构成对话,若构成则检查对话历史,若存在则完善对话过程,不存在则建立新的对话历史
     maintain_conversation_history(ai_client, valid_emails, sent_emails)
 
-
     return valid_emails, sent_emails
 
+
+# --- 自动循环和停止的包装函数 ---
+def start_auto_process_loop(ai_client, stop_event, interval_seconds=600):
+    """
+    周期性地运行 auto_process 函数，直到 stop_event 被设置。
+    """
+
+    while not stop_event.is_set():
+        mclient = None
+        print(f"\n[{time_module.strftime('%Y-%m-%d %H:%M:%S')}] 开始执行自动流程...")
+
+        try:
+            mclient = connect_and_login_email()
+
+            auto_process(mclient, ai_client)
+
+            print(f"[{time_module.strftime('%Y-%m-%d %H:%M:%S')}] 流程执行完毕。")
+
+
+        except Exception as e:
+            print(f"错误：在 auto_process 期间发生意外错误: {e}")
+
+        finally:
+            # --- (关键修改 2) ---
+            # 3. 无论成功还是失败, 都在循环结束时登出
+            if mclient:
+                print("  -> 正在从 IMAP 服务器登出...")
+                try:
+                    mclient.logout()
+                except Exception as logout_e:
+                    print(f"  -> 警告：登出时发生错误: {logout_e}")
+            mclient = None
+
+        print(f"  -> 下次执行将在 {interval_seconds} 秒后...")
+
+        interrupted = stop_event.wait(timeout=interval_seconds)
+
+        if interrupted:
+            break
+
+    print("自动处理循环已收到停止信号，即将退出。")
+
+
 if __name__ == '__main__':
+    # 设置间隔时间
+    PROCESS_INTERVAL_SECONDS = 60
 
     # 加载配置
-    mclient = connect_and_login_email()
     ai_client = connect_gemini()
 
+    # 在进行对话历史初始化之前，需要进行邮件读取的初始化来构建初始的有效邮件和发送邮件记录
     init_conversation_history(ai_client)
-    auto_process(mclient, ai_client)
 
+    # 创建 "停止" 信号
+    stop_loop_event = threading.Event()
 
     # 整个自动流程将定时进行，之后需要完善邮件的来源：qq邮箱、Y！メール、Gmail等。
 
+    # 在后台线程中启动循环
+    # (我们使用线程，这样主程序就不会被 "while True" 循环卡住)
+    process_thread = threading.Thread(
+        target=start_auto_process_loop,
+        args=(ai_client, stop_loop_event, PROCESS_INTERVAL_SECONDS),
+        daemon=True  # 设置为守护线程，这样主程序退出时它也会退出
+    )
 
-    mclient.logout()
+    # 主程序等待用户输入 "stop"
+    print("\n" + "=" * 50)
+    print("自动处理程序正在后台运行...")
+    print(f"每 {PROCESS_INTERVAL_SECONDS} 秒检查一次邮件。")
+    print("在控制台中输入 'stop' (或按 Enter) 来停止程序。")
+    print("=" * 50 + "\n")
+
+    process_thread.start()
+
+    try:
+        # 阻塞主线程，直到用户输入
+        input()
+    except EOFError:
+        pass  # 在某些非交互式环境中，input()会立即结束
+
+    # 用户输入后，发送 "停止" 信号
+    print("正在发送停止信号... (等待当前周期完成)")
+    stop_loop_event.set()
+
+    # 等待后台线程完全退出
+    # (这会等待 stop_event.wait() 结束, 确保循环优雅地退出)
+    process_thread.join(timeout=20)
+
+    print("程序已完全停止。")

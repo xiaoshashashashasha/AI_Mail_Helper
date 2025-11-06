@@ -26,6 +26,8 @@ except json.JSONDecodeError:
 CLASSIFICATION_PROMPT = prompt_file["CLASSIFICATION"]
 SUMMARY_PROMPT = prompt_file["SUMMARY"]
 CONVO_PROMPT = prompt_file["CONVERSATION"]
+HISTORY_SUMMARY = prompt_file["HISTORY_SUMMARY"]
+HISTORY_UPDATE = prompt_file["HISTORY_UPDATE"]
 
 # --- 辅助函数：重试机制 (用于处理 API 错误) ---
 def retry_gemini_call(func, *args, max_retries=3, delay=5, **kwargs):
@@ -43,7 +45,7 @@ def retry_gemini_call(func, *args, max_retries=3, delay=5, **kwargs):
                 raise
 
 
-# --- 邮件记录保存函数 ---
+# --- 邮件记录保存 ---
 def save_mail_judgment_record(new_records, judgment_type):
     """
     读取现有邮件判断记录，追加新记录，并写入文件，避免覆盖。
@@ -87,7 +89,7 @@ def save_mail_judgment_record(new_records, judgment_type):
         print(f"错误：写入文件 {JUDGMENT_RECORD_PATH} 失败: {e}")
 
 
-# --- 邮件分类函数 ---
+# --- 邮件分类 ---
 def get_score_for_uncertain_emails(ai_client, uncertain_emails, model_name="gemini-2.5-flash"):
     """
     对未分类的邮件进行 AI 评分和总结，分类记录会保存到JSON中。
@@ -387,3 +389,124 @@ def get_conversation_constitutes_for_emails(ai_client, emails, model_name="gemin
     print(f"AI 对话筛选完成： {len(emails)} 封邮件中，{len(result_list)} 封被保留为对话邮件。")
 
     return result_list
+
+
+# --- 对话历史总结 (可处理新旧两种格式，并智能更新) ---
+def get_history_summary_for_conversation(ai_client, memory_dict, model_name="gemini-2.5-flash"):
+    """
+    (最终版) 遍历 *所有* 对话历史，并为 *每一个* 历史生成或更新AI总体总结。
+
+    Args:
+        ai_client: 已经初始化的 genai.Client 实例。
+        memory_dict (dict):
+            - 旧格式: {"address": [email_list]}
+            - 或 新格式: {"address": {"general_summary": "...", "emails": [...]}}
+        model_name: 使用的模型名称
+
+    Returns:
+        dict: *始终*返回新格式 {"address": {"general_summary": "...", "emails": [...]}}
+    """
+
+    print(f"开始为 {len(memory_dict)} 条对话历史生成/更新总体总结...")
+
+    new_memory_structure = {}
+    total_conversations = len(memory_dict)
+    current_convo_num = 0
+
+    for address, value in memory_dict.items():
+        current_convo_num += 1
+        print(f"  [总结 {current_convo_num}/{total_conversations}] 正在处理: {address}")
+
+        # --- 1. (格式检测) ---
+        email_list = []
+        old_summary = None  # 默认为空
+
+        if isinstance(value, list):
+            # (检测到旧格式: 来自 init)
+            email_list = value
+        elif isinstance(value, dict):
+            # (检测到新格式: 来自 maintain)
+            email_list = value.get("emails", [])
+            old_summary = value.get("general_summary", None)  # (获取旧总结)
+        else:
+            print(f"    -> 警告: {address} 的数据格式无法识别，跳过。")
+            continue
+
+        if not email_list:
+            print("    -> 空对话，跳过。")
+            new_memory_structure[address] = {
+                "general_summary": "空对话历史。",
+                "emails": []
+            }
+            continue
+
+        # --- 2. 构造 Prompt 输入 (对话摘要) ---
+        digest_lines = []
+        for email in email_list:  # (假设 email_list 已排序)
+            speaker = "[我]" if email.get("type") == "sent" else "[对方]"
+            summary = email.get("summary", "无总结")
+            subject = email.get("subject", "无主题")
+            digest_lines.append(f"{speaker} (主题: {subject}): {summary}")
+        conversation_digest = "\n".join(digest_lines)
+
+        # --- 3. (关键: 智能选择 Prompt) ---
+        if old_summary and "AI处理失败" not in old_summary:
+            # --- (A) 使用 UPDATE 提示词 ---
+            print("    -> 检测到旧总结，执行[更新]操作...")
+            SYSTEM_PROMPT = HISTORY_UPDATE.get("SYSTEM_PROMPT", "")
+            SUMMARY_TASK = HISTORY_UPDATE.get("SUMMARY_TASK", "")
+            RESPONSE_INSTRUCTION = HISTORY_UPDATE.get("RESPONSE_FORMAT_INSTRUCTION", "")
+
+            final_prompt = (
+                    SYSTEM_PROMPT + "\n\n" +
+                    SUMMARY_TASK + "\n\n" +
+                    f"【旧的总结】:\n{old_summary}\n\n" +
+                    f"【完整的对话摘要 (按时间顺序)】:\n{conversation_digest[:3000]}\n\n" +
+                    RESPONSE_INSTRUCTION
+            )
+        else:
+            # --- (B) 使用 CREATE (History) 提示词 ---
+            if old_summary:
+                print("    -> 旧总结处理失败，执行[重新生成]操作...")
+            else:
+                print("    -> 未检测到旧总结，执行[创建]操作...")
+
+            SYSTEM_PROMPT = HISTORY_SUMMARY.get("SYSTEM_PROMPT", "")
+            SUMMARY_TASK = HISTORY_SUMMARY.get("SUMMARY_TASK", "")
+            RESPONSE_INSTRUCTION = HISTORY_SUMMARY.get("RESPONSE_FORMAT_INSTRUCTION", "")
+
+            final_prompt = (
+                    SYSTEM_PROMPT + "\n\n" +
+                    SUMMARY_TASK + "\n\n" +
+                    f"以下是按时间顺序排列的对话摘要:\n{conversation_digest[:3000]}\n\n" +
+                    RESPONSE_INSTRUCTION
+            )
+
+        # --- 4. 调用 API (try/except 块) ---
+        try:
+            response = retry_gemini_call(
+                ai_client.models.generate_content,
+                model=model_name,
+                contents=final_prompt,
+                config={"response_mime_type": "application/json"}
+            )
+            result = json.loads(response.text)
+            summary = result.get('general_summary', 'AI未提供总体总结')
+            print(f"    AI GEN_SUMMARY SUCCESS -> 总结: {summary[:30]}...")
+
+        except Exception as e:
+            summary = f"AI处理失败: {e}"
+            print(f"    AI GEN_SUMMARY FAIL -> 错误: {e}")
+
+        # --- 5. 构建新结构 ---
+        new_memory_structure[address] = {
+            "general_summary": summary,
+            "emails": email_list  # (email_list 是已排序的列表)
+        }
+
+        # --- 6. 速率限制 ---
+        time.sleep(SECONDS_BETWEEN_REQUESTS)
+
+    # 循环结束
+    print(f"信息：新数据结构转换完成 (共 {len(new_memory_structure)} 条对话)。")
+    return new_memory_structure
