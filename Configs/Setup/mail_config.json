@@ -1,0 +1,14 @@
+{
+  "EMAIL_CONFIG": {
+    "IMAP_SERVER": "YOUR EMAIL IMAP SERVER",
+    "IMAP_PORT": "YOUR IMAP PORT",
+    "EMAIL_ADDRESS": "YOUR EMAIL ADDRESS",
+    "APP_PASSWORD": "YOUR APP PASSWORD",
+    "TIME_AREA": "Asia",
+    "TIME_NATION": "Tokyo",
+    "THRESHOLD": {
+      "VALID_SCORE": 3
+    },
+    "NO_REPLY_PATTERNS": ["noreply", "no-reply", "no_reply", "system", "daemon", "info"]
+  }
+}
