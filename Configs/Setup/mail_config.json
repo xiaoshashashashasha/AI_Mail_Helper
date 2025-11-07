@@ -9,6 +9,6 @@
     "THRESHOLD": {
       "VALID_SCORE": 3
     },
-    "NO_REPLY_PATTERNS": ["noreply", "no-reply", "no_reply", "system", "daemon", "info"]
+    "NO_REPLY_PATTERNS": ["noreply", "no-reply", "no_reply", "system", "daemon", "info","alert"]
   }
 }
