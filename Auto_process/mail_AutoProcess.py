@@ -556,9 +556,11 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
             all_sent_emails = json.load(f)
     except FileNotFoundError as e:
         print(f"FATAL: 找不到历史邮件文件 {e.filename}。初始化失败。")
+        print("//////////////////对话历史初始化失败。//////////////////\n")
         return
     except Exception as e:
         print(f"FATAL: 无法读取历史邮件文件: {e}")
+        print("//////////////////对话历史初始化失败。//////////////////\n")
         return
 
     print(f"信息：已加载 {len(all_valid_emails)} 封收信和 {len(all_sent_emails)} 封发信。")
@@ -575,7 +577,7 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
             formatted_sent_emails.append(email)
             addresses_from_sent_mail.update(receivers)
 
-    print(f"信息：(发信优先) 从 {len(formatted_sent_emails)} 封发信中提取了 {len(addresses_from_sent_mail)} 个对话伙伴。")
+    print(f"信息：(发信优先) 从 {len(formatted_sent_emails)} 封发信中提取了 {len(addresses_from_sent_mail)} 个对话地址。")
 
     # --- 4. (格式化收信) ---
     formatted_valid_emails = []
@@ -641,8 +643,7 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
 
     print(f"信息：归档完成。总共添加了 {new_email_added_count} 封邮件到 {len(all_memory)} 条对话中。")
 
-    # --- 8. (排序、生成总结并保存) ---
-
+    # --- 8. (排序、生成总结/口吻并保存) ---
     print("信息：正在对所有对话进行时间排序...")
     for email_list in all_memory.values():
         if not isinstance(email_list, list): continue
@@ -652,11 +653,18 @@ def init_conversation_history(ai_client, all_valid_emails_path=VALID_MAIL_OUTPUT
             print(f"警告：对话 {e} 排序失败。")
 
     print("信息：调用AI为所有对话生成总体总结...")
-    final_memory_structure = AI_Handler.get_history_summary_for_conversation(ai_client, all_memory)
+    memory_with_summaries = AI_Handler.get_history_summary_for_conversation(ai_client, all_memory)
 
+    # (修改点 2: 将上一步的结果 传入 第二个 AI 函数)
+    print("信息：调用AI为所有对话生成口吻分析...")
+    final_memory_structure = AI_Handler.get_style_profile_for_conversation(ai_client, memory_with_summaries)
+
+    print(f"信息：AI 分析与数据结构合并完成。")
+
+    # (修改点 3: 保存)
     try:
         with open(memory_file_path, 'w', encoding='utf-8') as f:
-            # (保存最终的新结构)
+            # (保存最终的、包含总结和口吻的完整结构)
             json.dump(final_memory_structure, f, ensure_ascii=False, indent=2, default=datetime_to_json)
         print(f"信息：对话历史已成功初始化并保存到 {memory_file_path}")
     except Exception as e:
@@ -670,13 +678,13 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
     # 步骤：
     # 1. 读取对话历史 (修正)
     # 2. (发信优先) 格式化 sent_emails
-    # 3. (发信优先) 结合 known_addresses (修正 BUG)
+    # 3. (发信优先) 结合 known_addresses
     # 4. (格式化收信) 格式化 valid_emails
     # 5. (分流)
     # 6. (慢速通道) 运行 AI 清洗
     # 7. (归档) (修正) *内联* 新的归档逻辑
     # 8. (排序) (修正) 排序新结构
-    # 9. (总结) (实现) *仅* 为 'updated_addresses' 调用 AI 总结
+    # 9. (总结与口吻) (实现) *仅* 为 'updated_addresses' 调用 AI 管道
     # 10. (保存)
 
     if not (valid_emails or sent_emails):
@@ -697,7 +705,6 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
         all_memory = {}
 
     existing_ids = set()
-    # (修正点: 必须遍历新结构)
     for convo_data in all_memory.values():
         if isinstance(convo_data, dict):
             email_list = convo_data.get("emails", [])
@@ -722,8 +729,7 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
             formatted_sent_emails.append(email)
             addresses_from_sent_mail.update(receivers)
 
-    # --- 3. (发信优先) 结合 "已知地址" (修正 BUG) ---
-    # (BUG 修正：此行必须在 'if' 块之外，以确保 'known_addresses' 始终被定义)
+    # --- 3. (发信优先) 结合 "已知地址" ---
     known_addresses = existing_addresses_from_memory.union(addresses_from_sent_mail)
 
     if len(addresses_from_sent_mail) > 0:
@@ -773,18 +779,14 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
         print(f"信息：AI 清洗完成，{len(filtered_new_emails)} 封邮件被确认为新对话。")
         emails_to_add_fast.extend(filtered_new_emails)
 
-    # --- 7. (归档) (修正：内联逻辑，不再调用
+    # --- 7. (归档) ---
     print(f"信息：开始归档 {len(emails_to_add_fast)} 封最终邮件...")
 
     new_email_added_count = 0
-    # (实现点 1: 跟踪被修改的地址，用于 Step 9)
     addresses_that_were_updated = set()
-    # (实现点 2: 跟踪本次运行中添加的ID，用于正确计数)
-    processed_email_ids_in_this_run = set()
+    processed_email_ids_in_this_run = set(existing_ids)  # (修正：使用 existing_ids 初始化)
 
     for email in emails_to_add_fast:
-        # (Triage 步骤 (2, 4) 已经确保了 'email' 是新邮件)
-
         email_id = email.get("id")
         email_type = email.get("type")
 
@@ -801,46 +803,43 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
             print(f"警告：(归档) 邮件 {email_id} 无法确定归档地址，跳过。")
             continue
 
-        # (内联归档逻辑)
         for address in set(other_party_addresses):
             if not address: continue
 
-            # (关键) 检查并创建 *新* 结构
             if address not in all_memory:
                 all_memory[address] = {
-                    "general_summary": "[新对话：等待AI生成总结]",  # 临时占位符
+                    "general_summary": "[新对话：等待AI生成总结]",
+                    "style_profile": None,  # (为新对话添加占位符)
                     "emails": []
                 }
 
-            # (关键) 附加到 "emails" 键
             all_memory[address]["emails"].append(email)
-            addresses_that_were_updated.add(address)  # 标记此地址需要更新总结
+            addresses_that_were_updated.add(address)
 
-        # (处理"新邮件"计数，防止重复计算)
         if email_id and email_id not in processed_email_ids_in_this_run:
             new_email_added_count += 1
             processed_email_ids_in_this_run.add(email_id)
         elif not email_id:
-            new_email_added_count += 1  # 总是计算没有ID的邮件
+            new_email_added_count += 1
 
     print(
         f"信息：归档完成。总共添加了 {new_email_added_count} 封新邮件 (分布在 {len(addresses_that_were_updated)} 个对话中)。")
 
-    # --- 8. (排序) (修正) ---
+    # --- 8. (排序) ---
     print("信息：正在对所有受影响的对话进行时间排序...")
-    # (我们只排序被更新的列表即可，但为安全起见排序全部)
-    for address, convo_data in all_memory.items():
-        if isinstance(convo_data, dict):
-            email_list = convo_data.get("emails", [])
+    # (在AI分析前排序)
+    for address in addresses_that_were_updated:
+        if address in all_memory and isinstance(all_memory[address], dict):
+            email_list = all_memory[address].get("emails", [])
             if email_list:
                 try:
                     email_list.sort(key=get_sortable_time)
                 except Exception as e:
                     print(f"警告：对话 {address} 排序失败: {e}")
 
-    # --- 9. (总结) (实现) ---
+    # --- 9. (总结与口吻分析) (修改点) ---
     if addresses_that_were_updated:
-        print(f"信息：检测到 {len(addresses_that_were_updated)} 条对话有更新，准备调用AI更新总结...")
+        print(f"信息：检测到 {len(addresses_that_were_updated)} 条对话有更新，准备调用AI分析管道...")
 
         # (实现点: 只构建需要更新的子集)
         memory_to_update = {}
@@ -848,16 +847,29 @@ def maintain_conversation_history(ai_client, valid_emails, sent_emails, memory_f
             if address in all_memory:  # (安全检查)
                 memory_to_update[address] = all_memory[address]
 
-        # (调用AI，传入的 memory_to_update 是新格式)
-        updated_conversations = AI_Handler.get_history_summary_for_conversation(
+        # --- (AI Pipeline Step 1: 更新总结) ---
+        print("  -> (AI Pipeline 1/2) 正在更新对话总结...")
+        memory_with_updated_summaries = AI_Handler.get_history_summary_for_conversation(
             ai_client, memory_to_update
         )
+        print("  -> AI 总结更新完毕。")
 
-        # (实现点: 将AI返回的新总结合并回 all_memory)
-        all_memory.update(updated_conversations)
-        print("信息：AI 总结更新完毕。")
+        # --- (AI Pipeline Step 2: 更新口吻) ---
+        print("  -> (AI Pipeline 2/2) 正在更新口吻分析...")
+        # (将上一步的结果传入，确保口吻分析函数能保留更新后的总结)
+        final_updated_conversations = AI_Handler.get_style_profile_for_conversation(
+            ai_client, memory_with_updated_summaries
+        )
+        print("  -> AI 口吻分析更新完毕。")
+
+        # --- (AI Pipeline Step 3: 合并最终结果) ---
+        # (final_updated_conversations 包含了 "general_summary", "style_profile", "emails")
+        all_memory.update(final_updated_conversations)
+        print("信息：AI 分析结果已合并。")
+
     else:
         print("信息：没有检测到需要更新的对话总结。")
+    # --- (修改结束) ---
 
     # --- 10. (保存) ---
     try:

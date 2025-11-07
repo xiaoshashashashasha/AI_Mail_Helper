@@ -28,6 +28,8 @@ SUMMARY_PROMPT = prompt_file["SUMMARY"]
 CONVO_PROMPT = prompt_file["CONVERSATION"]
 HISTORY_SUMMARY = prompt_file["HISTORY_SUMMARY"]
 HISTORY_UPDATE = prompt_file["HISTORY_UPDATE"]
+CREATE_STYLE_PROMPT = prompt_file["CREATE_STYLE_PROFILE"]
+UPDATE_STYLE_PROMPT = prompt_file["UPDATE_STYLE_PROFILE"]
 
 # --- 辅助函数：重试机制 (用于处理 API 错误) ---
 def retry_gemini_call(func, *args, max_retries=3, delay=5, **kwargs):
@@ -391,20 +393,21 @@ def get_conversation_constitutes_for_emails(ai_client, emails, model_name="gemin
     return result_list
 
 
-# --- 对话历史总结 (可处理新旧两种格式，并智能更新) ---
+# --- 对话历史总结 ---
 def get_history_summary_for_conversation(ai_client, memory_dict, model_name="gemini-2.5-flash"):
     """
     (最终版) 遍历 *所有* 对话历史，并为 *每一个* 历史生成或更新AI总体总结。
+    (修正) 此版本会 *保留* 传入的 "style_profile" 键 (如果存在)。
 
     Args:
         ai_client: 已经初始化的 genai.Client 实例。
         memory_dict (dict):
             - 旧格式: {"address": [email_list]}
-            - 或 新格式: {"address": {"general_summary": "...", "emails": [...]}}
+            - 或 新格式: {"address": {"general_summary": "...", "style_profile": ..., "emails": [...]}}
         model_name: 使用的模型名称
 
     Returns:
-        dict: *始终*返回新格式 {"address": {"general_summary": "...", "emails": [...]}}
+        dict: *始终*返回新格式 {"address": {"general_summary": "...", "style_profile": ..., "emails": [...]}}
     """
 
     print(f"开始为 {len(memory_dict)} 条对话历史生成/更新总体总结...")
@@ -419,15 +422,18 @@ def get_history_summary_for_conversation(ai_client, memory_dict, model_name="gem
 
         # --- 1. (格式检测) ---
         email_list = []
-        old_summary = None  # 默认为空
+        old_summary = None
+        old_style_profile = None  # <-- (新增) 默认为空
 
         if isinstance(value, list):
             # (检测到旧格式: 来自 init)
             email_list = value
+            # (old_style_profile 保持 None)
         elif isinstance(value, dict):
             # (检测到新格式: 来自 maintain)
             email_list = value.get("emails", [])
-            old_summary = value.get("general_summary", None)  # (获取旧总结)
+            old_summary = value.get("general_summary", None)
+            old_style_profile = value.get("style_profile", None)  # <-- (新增) 获取已有的口吻
         else:
             print(f"    -> 警告: {address} 的数据格式无法识别，跳过。")
             continue
@@ -436,6 +442,7 @@ def get_history_summary_for_conversation(ai_client, memory_dict, model_name="gem
             print("    -> 空对话，跳过。")
             new_memory_structure[address] = {
                 "general_summary": "空对话历史。",
+                "style_profile": old_style_profile, # <-- (新增) 保留 (即使是 None)
                 "emails": []
             }
             continue
@@ -500,7 +507,8 @@ def get_history_summary_for_conversation(ai_client, memory_dict, model_name="gem
 
         # --- 5. 构建新结构 ---
         new_memory_structure[address] = {
-            "general_summary": summary,
+            "general_summary": summary, # (新生成的总结)
+            "style_profile": old_style_profile, # <-- (新增) 保留传入的口吻
             "emails": email_list  # (email_list 是已排序的列表)
         }
 
@@ -510,3 +518,142 @@ def get_history_summary_for_conversation(ai_client, memory_dict, model_name="gem
     # 循环结束
     print(f"信息：新数据结构转换完成 (共 {len(new_memory_structure)} 条对话)。")
     return new_memory_structure
+
+
+# --- 对话口吻分析 ---
+def get_style_profile_for_conversation(ai_client, memory_with_summaries, model_name="gemini-2.5-flash"):
+    """
+    (修正版) 遍历 *已经包含总结* 的对话历史，并为 *每一个* 历史生成或更新AI口吻分析 (style_profile)。
+    (修正) 增强了 JSON 解析的健壮性，以处理扁平(flat)响应。
+    (修正) 添加了对 'tone_description' 键的支持。
+    """
+    print(f"开始为 {len(memory_with_summaries)} 条对话历史生成/更新口吻分析...")
+
+    final_memory_structure = {}
+    total_conversations = len(memory_with_summaries)
+    current_convo_num = 0
+
+    # --- (修改点 1: 添加 new_key) ---
+    default_style_profile = {
+        "formality": "未知",
+        "tone_description": "未知", # <-- (新增)
+        "greeting_template": "无",
+        "sign_off_template": "无"
+    }
+    # --- (修改结束) ---
+
+    for address, value in memory_with_summaries.items():
+        current_convo_num += 1
+        print(f"  [口吻 {current_convo_num}/{total_conversations}] 正在处理: {address}")
+
+        # --- 1. (格式检测与数据提取) ---
+        if not isinstance(value, dict):
+            print(f"    -> 警告: {address} 的数据格式不是字典，跳过。")
+            continue
+
+        email_list = value.get("emails", [])
+        general_summary = value.get("general_summary", "总结丢失")
+        old_style_profile = value.get("style_profile", None)
+
+        # --- 2. 构造 Prompt 输入 (口吻分析) ---
+        sent_emails = [e for e in email_list if e.get("type") == "sent"]
+
+        if not sent_emails:
+            print("    -> 没有 'sent' 邮件，无法分析口吻，跳过。")
+            final_memory_structure[address] = {
+                "general_summary": general_summary,
+                "style_profile": default_style_profile.copy(), # (使用默认值)
+                "emails": email_list
+            }
+            continue
+
+        recent_bodies = [e.get("body", "") for e in sent_emails[-5:]]
+        style_digest = "\n\n--- (下一封邮件) ---\n\n".join(recent_bodies)
+
+        # --- 3. (智能选择 Prompt) ---
+        if old_style_profile and old_style_profile.get("formality", "未知") != "未知":
+            # (A) 使用 UPDATE 提示词
+            print("    -> 检测到旧口吻，执行[更新]操作...")
+            SYSTEM_PROMPT = UPDATE_STYLE_PROMPT.get("SYSTEM_PROMPT", "")
+            SUMMARY_TASK = UPDATE_STYLE_PROMPT.get("SUMMARY_TASK", "")
+            RESPONSE_INSTRUCTION = UPDATE_STYLE_PROMPT.get("RESPONSE_FORMAT_INSTRUCTION", "")
+
+            final_prompt = (
+                    SYSTEM_PROMPT + "\n\n" +
+                    SUMMARY_TASK + "\n\n" +
+                    f"【旧的风格分析】:\n{json.dumps(old_style_profile, ensure_ascii=False)}\n\n" +
+                    f"【最新的邮件正文 (按时间顺序)】:\n{style_digest[:3000]}\n\n" +
+                    RESPONSE_INSTRUCTION
+            )
+        else:
+            # (B) 使用 CREATE 提示词
+            if old_style_profile:
+                print("    -> 旧口吻无效，执行[重新生成]操作...")
+            else:
+                print("    -> 未检测到旧口吻，执行[创建]操作...")
+
+            SYSTEM_PROMPT = CREATE_STYLE_PROMPT.get("SYSTEM_PROMPT", "")
+            SUMMARY_TASK = CREATE_STYLE_PROMPT.get("SUMMARY_TASK", "")
+            RESPONSE_INSTRUCTION = CREATE_STYLE_PROMPT.get("RESPONSE_FORMAT_INSTRUCTION", "")
+
+            final_prompt = (
+                    SYSTEM_PROMPT + "\n\n" +
+                    SUMMARY_TASK + "\n\n" +
+                    f"以下是[我]发送的邮件正文 (按时间顺序):\n{style_digest[:3000]}\n\n" +
+                    RESPONSE_INSTRUCTION
+            )
+        # --- (Prompt 构造结束) ---
+
+        # --- 4. 调用 API (try/except 块) (已修正) ---
+        try:
+            response = retry_gemini_call(
+                ai_client.models.generate_content,
+                model=model_name,
+                contents=final_prompt,
+                config={"response_mime_type": "application/json"}
+            )
+            result = json.loads(response.text)
+
+            # (修正点: 健壮的解析逻辑)
+            style_profile = default_style_profile.copy()  # 先从默认值开始
+
+            if 'style_profile' in result and isinstance(result['style_profile'], dict):
+                # (A) 理想情况: AI 遵守了嵌套格式
+                print("    -> (解析) AI 遵守了 'style_profile' 嵌套格式。")
+                style_profile.update(result['style_profile'])  # .update() 会自动处理新键
+
+            elif 'formality' in result:
+                # (B) 备用方案: AI 返回了扁平(flat)格式
+                print("    -> (解析) 警告: AI 返回了扁平格式，正在手动构建。")
+                style_profile['formality'] = result.get('formality', '未知')
+                # --- (修改点 2: 添加 new_key) ---
+                style_profile['tone_description'] = result.get('tone_description', '未知') # <-- (新增)
+                # --- (修改结束) ---
+                style_profile['greeting_template'] = result.get('greeting_template', '无')
+                style_profile['sign_off_template'] = result.get('sign_off_template', '无')
+            else:
+                # (C) 失败情况: AI 返回了无法识别的 JSON
+                print("    -> (解析) 警告: AI 未返回 'style_profile' 或 'formality' 键。")
+                # (style_profile 保持为 default_style_profile)
+
+            print(f"    AI STYLE SUCCESS -> 格式: {style_profile.get('formality', 'N/A')}")
+
+        except Exception as e:
+            style_profile = default_style_profile.copy()
+            style_profile["error"] = f"AI处理失败: {e}"
+            print(f"    AI STYLE FAIL -> 错误: {e}")
+        # --- (修正结束) ---
+
+        # --- 5. (构建 *完整* 结构) ---
+        final_memory_structure[address] = {
+            "general_summary": general_summary,
+            "style_profile": style_profile,
+            "emails": email_list
+        }
+
+        # --- 6. 速率限制 ---
+        time.sleep(SECONDS_BETWEEN_REQUESTS)
+
+    # 循环结束
+    print(f"信息：口吻分析转换完成 (共 {len(final_memory_structure)} 条对话)。")
+    return final_memory_structure

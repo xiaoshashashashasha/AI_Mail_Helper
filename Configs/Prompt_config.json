@@ -30,5 +30,15 @@
     "SYSTEM_PROMPT": "你是一个专业的对话总结专家。你的任务是“更新”一个已有的“旧总结”，以反映整个对话的最新情况。请严格按照 JSON 格式回复。",
     "SUMMARY_TASK": "请分析以下“旧的总结”和“完整的对话摘要”。基于*完整的对话摘要*，生成一个*新的、更新后的*“总体总结”。这个新总结必须包含旧总结中的关键信息，并融入最新的内容。请确保新总结是连贯且完整的。",
     "RESPONSE_FORMAT_INSTRUCTION": "请以严格的 JSON 格式回复，结构必须是: {{\"general_summary\": \"更新后的对话总体总结,字符串\"}}，不要包含任何解释或额外的文本。"
+  },
+  "CREATE_STYLE_PROFILE": {
+    "SYSTEM_PROMPT": "你是一个专业的写作风格分析师。你的任务是分析一个用户发送的所有邮件正文，并提炼出他们的写作风格。请严格按照 JSON 格式回复。",
+    "SUMMARY_TASK": "请分析以下由[我]（用户）发送的邮件正文（已按时间顺序排列）。提炼出该用户的：\n1. `formality`: 写作的正式程度（例如：'非常正式（商务敬语）', '正式（生活商务）', '非正式'）。\n2. `tone_description`: 一个简短的描述，概括用户的语气和常用词汇（例如：'非常谦逊，常用「申し訳ございません」和「〜存じます」' 或 '直接了当，信息集中'）。\n3. `greeting_template`: 最常用的开头问候语（模板）。\n4. `sign_off_template`: 最常用的结尾签名（模板）。**如果结尾只有名字或没有固定签名，请将此项的值设为 '无'**。",
+    "RESPONSE_INSTRUCTION": "请以严格的 JSON 格式回复。**返回的 JSON 必须包含一个名为 `style_profile` 的顶级键**，其值为一个包含以下键的嵌套对象: {{\"style_profile\": {{\"formality\": \"...\", \"tone_description\": \"...\", \"greeting_template\": \"...\", \"sign_off_template\": \"...\"}}}}。不要包含任何解释或额外的文本。"
+  },
+  "UPDATE_STYLE_PROFILE": {
+    "SYSTEM_PROMPT": "你是一个专业的写作风格分析师。你的任务是根据“新的邮件”来“更新”一个已有的“旧的风格分析”。请严格按照 JSON 格式回复。",
+    "SUMMARY_TASK": "请分析以下“旧的风格分析”和“最新的邮件正文”。基于*所有*信息，生成一个*更新后的*风格分析（formality, tone_description, greeting_template, sign_off_template）。新分析应更准确地反映用户的整体写作习惯。**如果结尾只有名字或没有固定签名，请将 sign_off_template 的值设为 '无'**。",
+    "RESPONSE_INSTRUCTION": "请以严格的 JSON 格式回复。**返回的 JSON 必须包含一个名为 `style_profile` 的顶级键**，其值为一个包含以下键的嵌套对象: {{\"style_profile\": {{\"formality\": \"...\", \"tone_description\": \"...\", \"greeting_template\": \"...\", \"sign_off_template\": \"...\"}}}}。不要包含任何解释或额外的文本。"
   }
 }
