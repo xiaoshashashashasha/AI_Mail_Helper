@@ -7,12 +7,12 @@ import pytz
 import AI_Handler
 import time as time_module
 
-from datetime import datetime, time
+from datetime import datetime
 from email.utils import parseaddr
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from google import genai
-from Utils.util import datetime_to_json, extract_text_from_html, get_address_list_from_header, archive_email_to_memory, \
+from app.core.Utils.util import datetime_to_json, extract_text_from_html, get_address_list_from_header, archive_email_to_memory, \
     get_sortable_time
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
